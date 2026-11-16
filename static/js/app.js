@@ -1,0 +1,1336 @@
+/**
+ * GPS Terrestre Pro - Aplicação Principal (PWA Móvel)
+ */
+(function () {
+  'use strict';
+
+  const {
+    haversineMeters,
+    bearingDegrees,
+    cardinalPT,
+    formatDuration,
+    formatDistance,
+    formatCoords,
+    calcSunTimes,
+    buildGPX,
+    buildKML,
+    renderElevationSVG
+  } = window.GeoUtils;
+
+  const STORAGE_WPTS = 'gps_terrestre_wpts_v1';
+  const STORAGE_TRACKS = 'gps_terrestre_tracks_v1';
+  const STORAGE_CFG = 'gps_terrestre_cfg_v1';
+  const STORAGE_CAR = 'gps_terrestre_car_v1';
+
+  const state = {
+    lat: null,
+    lon: null,
+    alt: null,
+    acc: null,
+    speedKmh: 0,
+    gpsHeading: null,
+    compassHeading: null,
+    autoFollow: true,
+    headingUp: false,
+    voiceOn: true,
+    speedUnitIdx: 0, // 0=km/h, 1=mph, 2=m/s
+    coordFmt: 'DD',
+    speedLimit: 0,
+    lastSpeedBeep: 0,
+    layerIdx: 0,
+    wakeLock: null,
+
+    // Trip computer
+    trip: {
+      odoMeters: 0,
+      maxSpeedKmh: 0,
+      movingSec: 0,
+      gainMeters: 0,
+      lastAlt: null,
+      lastPos: null,
+      lastTime: null
+    },
+
+    // Track recording
+    rec: {
+      active: false,
+      paused: false,
+      points: [],
+      distMeters: 0,
+      gainMeters: 0,
+      startTime: null,
+      elapsedSec: 0,
+      lastAlt: null,
+      timerId: null
+    },
+
+    // Navigation
+    nav: {
+      active: false,
+      mode: 'driving',
+      target: null, // { lat, lon, name }
+      steps: [],
+      stepIdx: 0,
+      routeCoords: [],
+      totalDist: 0,
+      totalDur: 0,
+      lastSpokenIdx: -1
+    },
+
+    // Measure
+    measure: {
+      active: false,
+      points: []
+    },
+
+    // Pending waypoint
+    pendingWpt: null,
+    wptFilter: 'all',
+
+    waypoints: [],
+    tracks: [],
+    carPos: null
+  };
+
+  // --- DOM Helpers ---
+  const $ = (id) => document.getElementById(id);
+
+  function showToast(msg, ms = 2600) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove('show'), ms);
+  }
+
+  function loadStorage() {
+    try {
+      state.waypoints = JSON.parse(localStorage.getItem(STORAGE_WPTS) || '[]');
+      state.tracks = JSON.parse(localStorage.getItem(STORAGE_TRACKS) || '[]');
+      state.carPos = JSON.parse(localStorage.getItem(STORAGE_CAR) || 'null');
+      const cfg = JSON.parse(localStorage.getItem(STORAGE_CFG) || '{}');
+      if (cfg.coordFmt) state.coordFmt = cfg.coordFmt;
+      if (cfg.speedLimit != null) state.speedLimit = Number(cfg.speedLimit) || 0;
+      if (cfg.theme === 'day') document.body.classList.add('theme-day');
+    } catch (e) {
+      console.warn('Erro ao ler localStorage', e);
+    }
+    $('cfgCoordFmt').value = state.coordFmt;
+    $('cfgSpeedLimit').value = state.speedLimit;
+    $('hudCoordFmt').textContent = state.coordFmt;
+  }
+
+  function saveWaypoints() {
+    localStorage.setItem(STORAGE_WPTS, JSON.stringify(state.waypoints));
+  }
+
+  function saveTracks() {
+    localStorage.setItem(STORAGE_TRACKS, JSON.stringify(state.tracks));
+  }
+
+  function saveCfg() {
+    localStorage.setItem(
+      STORAGE_CFG,
+      JSON.stringify({
+        coordFmt: state.coordFmt,
+        speedLimit: state.speedLimit,
+        theme: document.body.classList.contains('theme-day') ? 'day' : 'night'
+      })
+    );
+  }
+
+  // --- Map Initialization ---
+  const map = L.map('mapa', {
+    zoomControl: false,
+    attributionControl: true
+  }).setView([38.7223, -9.1393], 7); // Portugal default before GPS lock
+
+  L.control.scale({ imperial: false, position: 'bottomleft' }).addTo(map);
+
+  const baseLayers = [
+    {
+      name: 'OSM Estradas',
+      layer: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© OpenStreetMap'
+      })
+    },
+    {
+      name: 'Topo & Trilhos',
+      layer: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+        maxZoom: 17,
+        attribution: '© OpenTopoMap'
+      })
+    },
+    {
+      name: 'Satélite',
+      layer: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 19,
+        attribution: '© Esri'
+      })
+    },
+    {
+      name: 'Ciclovias',
+      layer: L.tileLayer('https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© CyclOSM'
+      })
+    }
+  ];
+
+  baseLayers[0].layer.addTo(map);
+
+  const wptCluster = L.markerClusterGroup({ maxClusterRadius: 40 });
+  map.addLayer(wptCluster);
+
+  const recPolyline = L.polyline([], { color: '#ef4444', weight: 4, opacity: 0.9 }).addTo(map);
+  const routePolyline = L.polyline([], { color: '#10b981', weight: 5, opacity: 0.9 }).addTo(map);
+  const directLine = L.polyline([], { color: '#38bdf8', weight: 3, dashArray: '8,8' }).addTo(map);
+  const importedTrackLayer = L.polyline([], { color: '#f59e0b', weight: 4, opacity: 0.9 }).addTo(map);
+  const measureLine = L.polyline([], { color: '#f59e0b', weight: 3, dashArray: '6,6' }).addTo(map);
+  const measureMarkers = L.layerGroup().addTo(map);
+
+  let accCircle = null;
+  let userMarker = null;
+  let carMarker = null;
+  let tempPinMarker = null;
+
+  function createArrowIcon(deg) {
+    const rot = deg != null && !isNaN(deg) ? deg : 0;
+    return L.divIcon({
+      className: 'user-gps-arrow',
+      iconSize: [34, 34],
+      iconAnchor: [17, 17],
+      html: `<svg width="34" height="34" viewBox="0 0 34 34" style="transform:rotate(${rot}deg);filter:drop-shadow(0 2px 4px rgba(0,0,0,0.6));">
+        <polygon points="17,3 28,29 17,22 6,29" fill="#10b981" stroke="#ffffff" stroke-width="2.2" stroke-linejoin="round"/>
+      </svg>`
+    });
+  }
+
+  map.on('dragstart', () => {
+    state.autoFollow = false;
+    $('btnCenterGps').classList.remove('active');
+  });
+
+  // Tap on map: measure mode OR drop pin popup
+  map.on('click', (e) => {
+    const { lat, lng } = e.latlng;
+    if (state.measure.active) {
+      state.measure.points.push([lat, lng]);
+      L.circleMarker([lat, lng], { radius: 5, color: '#f59e0b', fillOpacity: 1 }).addTo(measureMarkers);
+      updateMeasureUI();
+      return;
+    }
+
+    if (tempPinMarker) map.removeLayer(tempPinMarker);
+    tempPinMarker = L.marker([lat, lng]).addTo(map);
+    const distTxt = state.lat != null ? formatDistance(haversineMeters(state.lat, state.lon, lat, lng)) : '--';
+    const html = `
+      <div style="min-width:170px;font-family:sans-serif;">
+        <div style="font-weight:700;margin-bottom:4px;">📍 Ponto no Mapa</div>
+        <div style="font-size:11px;color:#475569;margin-bottom:8px;">${lat.toFixed(5)}, ${lng.toFixed(5)} · Dist: ${distTxt}</div>
+        <div style="display:flex;gap:6px;">
+          <button onclick="window._gpsApp.routeTo(${lat},${lng},'Destino no Mapa')" style="flex:1;padding:6px;border:none;border-radius:6px;background:#10b981;color:#052e16;font-weight:700;cursor:pointer;">🧭 Ir</button>
+          <button onclick="window._gpsApp.openSaveWpt(${lat},${lng})" style="flex:1;padding:6px;border:none;border-radius:6px;background:#0f172a;color:#fff;font-weight:700;cursor:pointer;">⭐ Guardar</button>
+        </div>
+      </div>
+    `;
+    tempPinMarker.bindPopup(html).openPopup();
+  });
+
+  // --- Audio & Voice ---
+  function beepAlert() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.value = 0.15;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      setTimeout(() => { osc.stop(); ctx.close(); }, 220);
+    } catch (_) {}
+  }
+
+  function speakPT(text) {
+    if (!state.voiceOn || !('speechSynthesis' in window)) return;
+    try {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'pt-PT';
+      u.rate = 1.05;
+      window.speechSynthesis.speak(u);
+    } catch (_) {}
+  }
+
+  // --- GPS Watch ---
+  function startGPS() {
+    if (!('geolocation' in navigator)) {
+      $('gpsBadge').className = 'gps-badge err';
+      $('gpsBadgeTxt').textContent = 'Sem GPS';
+      return;
+    }
+
+    navigator.geolocation.watchPosition(
+      onPosition,
+      (err) => {
+        $('gpsBadge').className = 'gps-badge err';
+        $('gpsBadgeTxt').textContent = err.code === 1 ? 'GPS Bloqueado' : 'Sem Sinal';
+      },
+      { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 }
+    );
+  }
+
+  function onPosition(pos) {
+    const c = pos.coords;
+    const now = Date.now();
+    const lat = c.latitude;
+    const lon = c.longitude;
+    const alt = c.altitude;
+    const acc = c.accuracy;
+    const spdMs = c.speed != null && !isNaN(c.speed) ? Math.max(0, c.speed) : 0;
+    const spdKmh = spdMs * 3.6;
+
+    state.lat = lat;
+    state.lon = lon;
+    state.alt = alt;
+    state.acc = acc;
+    state.speedKmh = spdKmh;
+    if (c.heading != null && !isNaN(c.heading) && spdKmh > 2.5) {
+      state.gpsHeading = c.heading;
+    }
+
+    $('gpsBadge').className = 'gps-badge ok';
+    $('gpsBadgeTxt').textContent = `GPS ±${Math.round(acc)}m`;
+
+    // Trip computer updates
+    if (state.trip.lastPos) {
+      const d = haversineMeters(state.trip.lastPos.lat, state.trip.lastPos.lon, lat, lon);
+      if (d > 2 && d < 500 && acc < 45) {
+        state.trip.odoMeters += d;
+      }
+      if (spdKmh > 1.5 && state.trip.lastTime) {
+        state.trip.movingSec += Math.min(10, (now - state.trip.lastTime) / 1000);
+      }
+    }
+    state.trip.lastPos = { lat, lon };
+    state.trip.lastTime = now;
+    if (spdKmh > state.trip.maxSpeedKmh) state.trip.maxSpeedKmh = spdKmh;
+
+    if (alt != null && !isNaN(alt)) {
+      if (state.trip.lastAlt != null) {
+        const diffAlt = alt - state.trip.lastAlt;
+        if (diffAlt > 1.5 && diffAlt < 50) {
+          state.trip.gainMeters += diffAlt;
+          state.trip.lastAlt = alt;
+        } else if (diffAlt < -1.5) {
+          state.trip.lastAlt = alt;
+        }
+      } else {
+        state.trip.lastAlt = alt;
+      }
+    }
+
+    // Speed limit alert
+    if (state.speedLimit > 0 && spdKmh > state.speedLimit) {
+      $('hudCard').classList.add('speed-alert');
+      if (now - state.lastSpeedBeep > 5000) {
+        state.lastSpeedBeep = now;
+        beepAlert();
+      }
+    } else {
+      $('hudCard').classList.remove('speed-alert');
+    }
+
+    // Track recording
+    if (state.rec.active && !state.rec.paused) {
+      const pts = state.rec.points;
+      const last = pts[pts.length - 1];
+      const stepD = last ? haversineMeters(last.lat, last.lon, lat, lon) : 999;
+      if (!last || stepD >= 4) {
+        if (last) state.rec.distMeters += stepD;
+        if (alt != null && !isNaN(alt)) {
+          if (state.rec.lastAlt != null && alt - state.rec.lastAlt > 1.5) {
+            state.rec.gainMeters += alt - state.rec.lastAlt;
+            state.rec.lastAlt = alt;
+          } else if (state.rec.lastAlt == null || alt < state.rec.lastAlt - 1.5) {
+            state.rec.lastAlt = alt;
+          }
+        }
+        pts.push({ lat, lon, ele: alt, time: now });
+        recPolyline.addLatLng([lat, lon]);
+      }
+    }
+
+    // Update map marker
+    const activeHeading = state.gpsHeading != null ? state.gpsHeading : state.compassHeading;
+    if (!userMarker) {
+      userMarker = L.marker([lat, lon], { icon: createArrowIcon(activeHeading), zIndexOffset: 1000 }).addTo(map);
+      accCircle = L.circle([lat, lon], { radius: acc, color: '#10b981', fillOpacity: 0.12, weight: 1 }).addTo(map);
+      map.setView([lat, lon], 16);
+    } else {
+      userMarker.setLatLng([lat, lon]);
+      userMarker.setIcon(createArrowIcon(activeHeading));
+      accCircle.setLatLng([lat, lon]).setRadius(acc);
+      if (state.autoFollow) {
+        map.panTo([lat, lon], { animate: true, duration: 0.5 });
+      }
+    }
+
+    if (state.headingUp && activeHeading != null) {
+      $('mapa').style.transform = `rotate(${-activeHeading}deg)`;
+    } else {
+      $('mapa').style.transform = 'rotate(0deg)';
+    }
+
+    updateHUD();
+    if (state.nav.active) updateNavigationProgress();
+  }
+
+  function updateHUD() {
+    const units = [
+      { label: 'km/h', mult: 1, dec: 0 },
+      { label: 'mph', mult: 0.621371, dec: 0 },
+      { label: 'm/s', mult: 1 / 3.6, dec: 1 }
+    ];
+    const u = units[state.speedUnitIdx];
+    $('hudSpeed').textContent = (state.speedKmh * u.mult).toFixed(u.dec);
+    $('hudSpeedUnit').textContent = u.label;
+
+    const hdg = state.gpsHeading != null ? state.gpsHeading : state.compassHeading;
+    $('hudHeading').textContent = hdg != null ? `${Math.round(hdg)}°` : '---°';
+    $('hudCardinal').textContent = cardinalPT(hdg);
+
+    const [c1, c2] = formatCoords(state.lat, state.lon, state.coordFmt);
+    $('hudCoords').innerHTML = `<div>${c1}</div><div>${c2}</div>`;
+    $('hudCoordFmt').textContent = state.coordFmt;
+
+    $('hudAlt').textContent = state.alt != null ? `${Math.round(state.alt)} m` : '-- m';
+    $('hudGain').textContent = `+${Math.round(state.trip.gainMeters)} m`;
+    $('hudAcc').textContent = state.acc != null ? `±${Math.round(state.acc)} m` : '±-- m';
+    $('hudOdo').textContent = `${(state.trip.odoMeters / 1000).toFixed(2)} km`;
+
+    // Instruments sheet updates
+    $('instHeading').textContent = hdg != null ? `${Math.round(hdg)}°` : '---°';
+    $('instCardinal').textContent = cardinalPT(hdg);
+    if (hdg != null) $('compassDial').style.transform = `rotate(${-hdg}deg)`;
+
+    $('tripOdo').textContent = `${(state.trip.odoMeters / 1000).toFixed(2)} km`;
+    $('tripMaxSpd').textContent = `${Math.round(state.trip.maxSpeedKmh)} km/h`;
+    const avgKmh = state.trip.movingSec > 5 ? (state.trip.odoMeters / 1000) / (state.trip.movingSec / 3600) : 0;
+    $('tripAvgSpd').textContent = `${Math.round(avgKmh)} km/h`;
+    $('tripMoveTime').textContent = formatDuration(state.trip.movingSec);
+    $('instAltGain').textContent = `${state.alt != null ? Math.round(state.alt) : '--'} m / +${Math.round(state.trip.gainMeters)}m`;
+
+    if (state.lat != null) {
+      const sun = calcSunTimes(state.lat, state.lon);
+      $('instSun').textContent = `${sun.sunrise} / ${sun.sunset}`;
+    }
+  }
+
+  // --- Compass Sensor ---
+  function handleOrientation(ev) {
+    let hdg = null;
+    if (ev.webkitCompassHeading != null) {
+      hdg = ev.webkitCompassHeading;
+    } else if (ev.alpha != null) {
+      hdg = (360 - ev.alpha) % 360;
+    }
+    if (hdg != null && !isNaN(hdg)) {
+      state.compassHeading = hdg;
+      if (state.speedKmh <= 2.5) updateHUD();
+    }
+  }
+
+  function initCompass() {
+    if ('ondeviceorientationabsolute' in window) {
+      window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+    } else if ('DeviceOrientationEvent' in window) {
+      window.addEventListener('deviceorientation', handleOrientation, true);
+    }
+  }
+
+  $('btnCalibrateCompass').addEventListener('click', async () => {
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        const res = await DeviceOrientationEvent.requestPermission();
+        if (res === 'granted') {
+          initCompass();
+          showToast('Bússola ativada!');
+        } else {
+          showToast('Permissão de bússola recusada.');
+        }
+      } catch (e) {
+        showToast('Erro ao ativar bússola.');
+      }
+    } else {
+      initCompass();
+      showToast('Sensor de bússola ativo. Faça um movimento em "8" para calibrar.');
+    }
+  });
+
+  // --- Search & Routing (Nominatim + OSRM) ---
+  async function searchLocation(query) {
+    const q = query.trim();
+    if (!q) return;
+
+    // Direct lat,lon check
+    const coordMatch = q.match(/^(-?\d+(?:\.\d+)?)\s*[,;\s]\s*(-?\d+(?:\.\d+)?)$/);
+    if (coordMatch) {
+      const lat = parseFloat(coordMatch[1]);
+      const lon = parseFloat(coordMatch[2]);
+      if (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
+        routeTo(lat, lon, `${lat.toFixed(4)}, ${lngOrLon(lon)}`);
+        return;
+      }
+    }
+
+    const box = $('searchResults');
+    box.innerHTML = '<div class="list-card-sub">A pesquisar...</div>';
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=6&q=${encodeURIComponent(q)}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!data.length) {
+        box.innerHTML = '<div class="list-card-sub">Sem resultados encontrados.</div>';
+        return;
+      }
+      box.innerHTML = '';
+      data.forEach((item) => {
+        const lat = parseFloat(item.lat);
+        const lon = parseFloat(item.lon);
+        const dist = state.lat != null ? formatDistance(haversineMeters(state.lat, state.lon, lat, lon)) : '';
+        const div = document.createElement('div');
+        div.className = 'list-card';
+        div.innerHTML = `
+          <div class="list-card-top">
+            <div>
+              <div class="list-card-title">${item.display_name.split(',')[0]}</div>
+              <div class="list-card-sub">${item.display_name} ${dist ? '· ' + dist : ''}</div>
+            </div>
+            <button class="btn btn-sm btn-primary">Ir</button>
+          </div>
+        `;
+        div.querySelector('button').addEventListener('click', () => {
+          routeTo(lat, lon, item.display_name.split(',')[0]);
+        });
+        box.appendChild(div);
+      });
+    } catch (e) {
+      box.innerHTML = '<div class="list-card-sub">Erro na pesquisa (sem internet?).</div>';
+    }
+  }
+
+  function lngOrLon(v) { return v.toFixed(4); }
+
+  function maneuverPT(step) {
+    const m = step.maneuver || {};
+    const type = m.type || '';
+    const mod = m.modifier || '';
+    const road = step.name ? ` para ${step.name}` : '';
+    if (type === 'arrive') return { icon: '🏁', text: 'Chegou ao destino' };
+    if (type === 'depart') return { icon: '🚀', text: `Siga${road}` };
+    if (type === 'roundabout' || type === 'rotary') {
+      return { icon: '🔄', text: `Na rotunda, saia na ${m.exit || 1}ª saída${road}` };
+    }
+    if (mod.includes('left')) return { icon: '⬅️', text: `Vire à esquerda${road}` };
+    if (mod.includes('right')) return { icon: '➡️', text: `Vire à direita${road}` };
+    if (mod.includes('uturn')) return { icon: '↩️', text: `Inverta a marcha${road}` };
+    return { icon: '⬆️', text: `Continue em frente${road}` };
+  }
+
+  async function routeTo(destLat, destLon, destName) {
+    closeAllSheets();
+    if (state.lat == null) {
+      map.setView([destLat, destLon], 15);
+      showToast('A aguardar sinal GPS para calcular rota.');
+      return;
+    }
+
+    state.nav.active = true;
+    state.nav.target = { lat: destLat, lon: destLon, name: destName };
+    state.nav.lastSpokenIdx = -1;
+    state.nav.stepIdx = 0;
+
+    if (state.nav.mode === 'direct') {
+      routePolyline.setLatLngs([]);
+      directLine.setLatLngs([[state.lat, state.lon], [destLat, destLon]]);
+      state.nav.steps = [];
+      $('navBanner').classList.add('visible');
+      updateNavigationProgress();
+      speakPT(`A navegar em linha reta para ${destName}`);
+      return;
+    }
+
+    directLine.setLatLngs([]);
+    const profile = state.nav.mode === 'cycling' ? 'bike' : state.nav.mode === 'foot' ? 'foot' : 'car';
+    const url = `https://router.project-osrm.org/route/v1/${profile}/${state.lon},${state.lat};${destLon},${destLat}?overview=full&geometries=geojson&steps=true`;
+
+    try {
+      showToast('A calcular rota...');
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.code !== 'Ok' || !data.routes.length) throw new Error('No route');
+
+      const route = data.routes[0];
+      const coords = route.geometry.coordinates.map((c) => [c[1], c[0]]);
+      routePolyline.setLatLngs(coords);
+      map.fitBounds(routePolyline.getBounds(), { padding: [60, 60] });
+
+      state.nav.routeCoords = coords;
+      state.nav.steps = route.legs[0].steps || [];
+      state.nav.totalDist = route.distance;
+      state.nav.totalDur = route.duration;
+
+      renderRouteSteps(state.nav.steps);
+      $('navBanner').classList.add('visible');
+      updateNavigationProgress();
+      speakPT(`Rota calculada para ${destName}. ${formatDistance(route.distance)}.`);
+    } catch (e) {
+      // Fallback to direct bearing
+      state.nav.mode = 'direct';
+      directLine.setLatLngs([[state.lat, state.lon], [destLat, destLon]]);
+      $('navBanner').classList.add('visible');
+      updateNavigationProgress();
+      showToast('Rota online indisponível. A usar linha reta.');
+    }
+  }
+
+  function renderRouteSteps(steps) {
+    const box = $('routeStepsBox');
+    const list = $('routeStepsList');
+    if (!steps.length) {
+      box.style.display = 'none';
+      return;
+    }
+    box.style.display = 'block';
+    list.innerHTML = steps.map((s) => {
+      const m = maneuverPT(s);
+      return `<div class="list-card"><div>${m.icon} <strong>${m.text}</strong></div><div class="list-card-sub">${formatDistance(s.distance)}</div></div>`;
+    }).join('');
+  }
+
+  function updateNavigationProgress() {
+    if (!state.nav.active || state.lat == null || !state.nav.target) return;
+    const t = state.nav.target;
+    const directD = haversineMeters(state.lat, state.lon, t.lat, t.lon);
+    const brg = bearingDegrees(state.lat, state.lon, t.lat, t.lon);
+
+    if (state.nav.mode === 'direct' || !state.nav.steps.length) {
+      directLine.setLatLngs([[state.lat, state.lon], [t.lat, t.lon]]);
+      $('navIcon').textContent = '🧭';
+      $('navInstr').textContent = `Rumo ${Math.round(brg)}° (${cardinalPT(brg)})`;
+      $('navSub').textContent = `Destino: ${t.name}`;
+      $('navDist').textContent = formatDistance(directD);
+      const spd = Math.max(4, state.speedKmh || (state.nav.mode === 'foot' ? 5 : 40));
+      const mins = Math.round((directD / 1000 / spd) * 60);
+      $('navEtr').textContent = `${mins} min`;
+      const eta = new Date(Date.now() + mins * 60000);
+      $('navEta').textContent = eta.toTimeString().slice(0, 5);
+      return;
+    }
+
+    // Advance turn-by-turn step when close to maneuver
+    const steps = state.nav.steps;
+    let idx = state.nav.stepIdx;
+    while (idx < steps.length - 1) {
+      const loc = steps[idx].maneuver.location; // [lon, lat]
+      const dStep = haversineMeters(state.lat, state.lon, loc[1], loc[0]);
+      if (dStep < 28) {
+        idx++;
+      } else {
+        break;
+      }
+    }
+    state.nav.stepIdx = idx;
+    const curStep = steps[idx];
+    const m = maneuverPT(curStep);
+    const loc = curStep.maneuver.location;
+    const dNext = haversineMeters(state.lat, state.lon, loc[1], loc[0]);
+
+    $('navIcon').textContent = m.icon;
+    $('navInstr').textContent = m.text;
+    $('navSub').textContent = `Em ${formatDistance(dNext)} · ${t.name}`;
+
+    if (idx !== state.nav.lastSpokenIdx && dNext < 180) {
+      state.nav.lastSpokenIdx = idx;
+      speakPT(`${m.text} em ${Math.round(dNext)} metros`);
+    }
+
+    // Remaining distance & duration from current step onward
+    let remDist = dNext;
+    let remDur = 0;
+    for (let i = idx; i < steps.length; i++) {
+      remDist += steps[i].distance;
+      remDur += steps[i].duration;
+    }
+    $('navDist').textContent = formatDistance(remDist);
+    const mins = Math.max(1, Math.round(remDur / 60));
+    $('navEtr').textContent = `${mins} min`;
+    const eta = new Date(Date.now() + mins * 60000);
+    $('navEta').textContent = eta.toTimeString().slice(0, 5);
+
+    if (directD < 25) {
+      speakPT(`Chegou ao seu destino: ${t.name}`);
+      cancelNavigation();
+      showToast(`🏁 Chegou a ${t.name}!`);
+    }
+  }
+
+  function cancelNavigation() {
+    state.nav.active = false;
+    routePolyline.setLatLngs([]);
+    directLine.setLatLngs([]);
+    $('navBanner').classList.remove('visible');
+    $('routeStepsBox').style.display = 'none';
+  }
+
+  // --- Track Recorder ---
+  function startRecording() {
+    state.rec = {
+      active: true,
+      paused: false,
+      points: [],
+      distMeters: 0,
+      gainMeters: 0,
+      startTime: Date.now(),
+      elapsedSec: 0,
+      lastAlt: state.alt,
+      timerId: null
+    };
+    recPolyline.setLatLngs([]);
+    if (state.lat != null) {
+      state.rec.points.push({ lat: state.lat, lon: state.lon, ele: state.alt, time: Date.now() });
+      recPolyline.addLatLng([state.lat, state.lon]);
+    }
+    $('recBar').classList.add('visible');
+    $('dockRecBtn').classList.add('recording');
+    $('recStatusTxt').textContent = 'A gravar';
+    $('btnRecPause').textContent = '⏸';
+
+    state.rec.timerId = setInterval(() => {
+      if (!state.rec.paused) {
+        state.rec.elapsedSec++;
+        $('recDist').textContent = `${(state.rec.distMeters / 1000).toFixed(2)} km`;
+        $('recTime').textContent = formatDuration(state.rec.elapsedSec);
+        $('recGain').textContent = `+${Math.round(state.rec.gainMeters)}m`;
+      }
+    }, 1000);
+    closeAllSheets();
+    showToast('⏺️ Gravação de percurso iniciada');
+  }
+
+  function togglePauseRec() {
+    if (!state.rec.active) return;
+    state.rec.paused = !state.rec.paused;
+    $('recStatusTxt').textContent = state.rec.paused ? 'Em pausa' : 'A gravar';
+    $('btnRecPause').textContent = state.rec.paused ? '▶' : '⏸';
+  }
+
+  function stopAndSaveRec() {
+    if (!state.rec.active) return;
+    clearInterval(state.rec.timerId);
+    state.rec.active = false;
+    $('recBar').classList.remove('visible');
+    $('dockRecBtn').classList.remove('recording');
+
+    if (state.rec.points.length < 2) {
+      showToast('Percurso demasiado curto para guardar.');
+      return;
+    }
+
+    const name = prompt('Nome do percurso:', `Percurso ${new Date().toLocaleDateString('pt-PT')} ${new Date().toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' })}`);
+    if (!name) return;
+
+    state.tracks.unshift({
+      id: Date.now(),
+      name,
+      date: new Date().toISOString(),
+      distMeters: state.rec.distMeters,
+      durationSec: state.rec.elapsedSec,
+      gainMeters: state.rec.gainMeters,
+      points: state.rec.points
+    });
+    saveTracks();
+    renderTracksList();
+    showToast(`💾 Percurso "${name}" guardado!`);
+  }
+
+  function renderTracksList() {
+    const list = $('tracksList');
+    if (!state.tracks.length) {
+      list.innerHTML = '<div class="list-card-sub">Nenhum percurso gravado ou importado ainda.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    state.tracks.forEach((t) => {
+      const div = document.createElement('div');
+      div.className = 'list-card';
+      div.innerHTML = `
+        <div class="list-card-top">
+          <div>
+            <div class="list-card-title">🥾 ${t.name}</div>
+            <div class="list-card-sub">${formatDistance(t.distMeters)} · ${formatDuration(t.durationSec)} · +${Math.round(t.gainMeters || 0)}m · ${t.points.length} pts</div>
+          </div>
+        </div>
+        <div class="chip-row">
+          <button class="btn btn-sm btn-primary" data-act="show">🗺️ Ver</button>
+          <button class="btn btn-sm" data-act="profile">📈 Perfil</button>
+          <button class="btn btn-sm" data-act="gpx">📤 GPX</button>
+          <button class="btn btn-sm" data-act="kml">KML</button>
+          <button class="btn btn-sm btn-danger" data-act="del">🗑️</button>
+        </div>
+      `;
+      div.querySelector('[data-act="show"]').onclick = () => {
+        const latlngs = t.points.map((p) => [p.lat, p.lon]);
+        importedTrackLayer.setLatLngs(latlngs);
+        map.fitBounds(importedTrackLayer.getBounds(), { padding: [40, 40] });
+        closeAllSheets();
+      };
+      div.querySelector('[data-act="profile"]').onclick = () => {
+        $('profileTitle').textContent = `📈 ${t.name}`;
+        $('profileSvg').innerHTML = renderElevationSVG(t.points);
+        $('trackProfileBox').style.display = 'block';
+      };
+      div.querySelector('[data-act="gpx"]').onclick = () => {
+        downloadText(`${t.name}.gpx`, buildGPX({ tracks: [t], name: t.name }), 'application/gpx+xml');
+      };
+      div.querySelector('[data-act="kml"]').onclick = () => {
+        downloadText(`${t.name}.kml`, buildKML(t), 'application/vnd.google-earth.kml+xml');
+      };
+      div.querySelector('[data-act="del"]').onclick = () => {
+        state.tracks = state.tracks.filter((x) => x.id !== t.id);
+        saveTracks();
+        renderTracksList();
+      };
+      list.appendChild(div);
+    });
+  }
+
+  // --- Waypoints & Car Marker ---
+  function renderWaypointsMap() {
+    wptCluster.clearLayers();
+    state.waypoints.forEach((w) => {
+      const m = L.marker([w.lat, w.lon], {
+        icon: L.divIcon({
+          className: 'wpt-pin',
+          iconSize: [28, 28],
+          iconAnchor: [14, 14],
+          html: `<div style="font-size:20px;filter:drop-shadow(0 2px 3px rgba(0,0,0,0.6));">${w.category || '📍'}</div>`
+        })
+      });
+      m.bindPopup(`
+        <strong>${w.category || '📍'} ${w.name}</strong><br>
+        <small>${w.lat.toFixed(5)}, ${w.lon.toFixed(5)}</small><br>
+        ${w.notes ? `<small>${w.notes}</small><br>` : ''}
+        <button onclick="window._gpsApp.routeTo(${w.lat},${w.lon},'${w.name.replace(/'/g, '')}')" style="margin-top:6px;padding:5px 10px;border:none;border-radius:6px;background:#10b981;color:#052e16;font-weight:700;cursor:pointer;">🧭 Navegar</button>
+      `);
+      wptCluster.addLayer(m);
+    });
+
+    if (carMarker) map.removeLayer(carMarker);
+    if (state.carPos) {
+      carMarker = L.marker([state.carPos.lat, state.carPos.lon], {
+        icon: L.divIcon({ className: 'car-pin', iconSize: [30, 30], iconAnchor: [15, 15], html: '<div style="font-size:22px;">🚗</div>' })
+      }).addTo(map).bindPopup('🚗 Carro Estacionado');
+      $('quickCarBox').style.display = 'block';
+      $('quickCarSub').textContent = `${state.carPos.lat.toFixed(5)}, ${state.carPos.lon.toFixed(5)}`;
+    } else {
+      $('quickCarBox').style.display = 'none';
+    }
+  }
+
+  function renderWaypointsList() {
+    const list = $('waypointsList');
+    const filtered = state.wptFilter === 'all'
+      ? state.waypoints
+      : state.waypoints.filter((w) => w.category === state.wptFilter);
+
+    if (!filtered.length) {
+      list.innerHTML = '<div class="list-card-sub">Sem pontos nesta categoria.</div>';
+      return;
+    }
+
+    list.innerHTML = '';
+    filtered.forEach((w) => {
+      const dist = state.lat != null ? formatDistance(haversineMeters(state.lat, state.lon, w.lat, w.lon)) : '--';
+      const div = document.createElement('div');
+      div.className = 'list-card';
+      div.innerHTML = `
+        <div class="list-card-top">
+          <div>
+            <div class="list-card-title">${w.category || '📍'} ${w.name}</div>
+            <div class="list-card-sub">${dist} · ${w.lat.toFixed(5)}, ${w.lon.toFixed(5)}</div>
+          </div>
+        </div>
+        <div class="chip-row">
+          <button class="btn btn-sm btn-primary" data-act="go">🧭 Ir</button>
+          <button class="btn btn-sm" data-act="view">👁️ Mapa</button>
+          <button class="btn btn-sm btn-danger" data-act="del">🗑️</button>
+        </div>
+      `;
+      div.querySelector('[data-act="go"]').onclick = () => routeTo(w.lat, w.lon, w.name);
+      div.querySelector('[data-act="view"]').onclick = () => { map.setView([w.lat, w.lon], 16); closeAllSheets(); };
+      div.querySelector('[data-act="del"]').onclick = () => {
+        state.waypoints = state.waypoints.filter((x) => x.id !== w.id);
+        saveWaypoints();
+        renderWaypointsMap();
+        renderWaypointsList();
+      };
+      list.appendChild(div);
+    });
+  }
+
+  function openSaveWpt(lat, lon) {
+    if (lat == null || lon == null) {
+      if (state.lat == null) {
+        showToast('A aguardar sinal GPS...');
+        return;
+      }
+      lat = state.lat;
+      lon = state.lon;
+    }
+    state.pendingWpt = { lat, lon, ele: state.alt };
+    $('wptNameInput').value = '';
+    $('wptNotesInput').value = '';
+    $('wptCoordPreview').textContent = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+    openSheet('sheetAddWpt');
+  }
+
+  // --- File Import/Export ---
+  function downloadText(filename, content, mime) {
+    const blob = new Blob([content], { type: mime || 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  function handleImportFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const text = reader.result;
+        let geo;
+        if (file.name.toLowerCase().endsWith('.gpx')) {
+          const dom = new DOMParser().parseFromString(text, 'text/xml');
+          geo = toGeoJSON.gpx(dom);
+        } else if (file.name.toLowerCase().endsWith('.kml')) {
+          const dom = new DOMParser().parseFromString(text, 'text/xml');
+          geo = toGeoJSON.kml(dom);
+        } else {
+          geo = JSON.parse(text);
+        }
+
+        let addedWpts = 0, addedTrks = 0;
+        for (const f of geo.features || []) {
+          if (!f.geometry) continue;
+          if (f.geometry.type === 'Point') {
+            const [lon, lat, ele] = f.geometry.coordinates;
+            state.waypoints.unshift({
+              id: Date.now() + Math.random(),
+              name: (f.properties && f.properties.name) || 'Ponto Importado',
+              category: '🏔️',
+              notes: (f.properties && f.properties.desc) || '',
+              lat, lon, ele
+            });
+            addedWpts++;
+          } else if (f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') {
+            const coords = f.geometry.type === 'LineString'
+              ? f.geometry.coordinates
+              : f.geometry.coordinates.flat();
+            const pts = coords.map((c) => ({ lat: c[1], lon: c[0], ele: c[2] }));
+            let dist = 0, gain = 0;
+            for (let i = 1; i < pts.length; i++) {
+              dist += haversineMeters(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
+              if (pts[i].ele != null && pts[i - 1].ele != null && pts[i].ele > pts[i - 1].ele) {
+                gain += pts[i].ele - pts[i - 1].ele;
+              }
+            }
+            state.tracks.unshift({
+              id: Date.now() + Math.random(),
+              name: (f.properties && f.properties.name) || file.name,
+              date: new Date().toISOString(),
+              distMeters: dist,
+              durationSec: 0,
+              gainMeters: gain,
+              points: pts
+            });
+            addedTrks++;
+          }
+        }
+        saveWaypoints();
+        saveTracks();
+        renderWaypointsMap();
+        renderWaypointsList();
+        renderTracksList();
+        showToast(`Importado: ${addedTrks} percursos, ${addedWpts} pontos!`);
+      } catch (e) {
+        showToast('Erro ao importar ficheiro.');
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  // --- Measure Tool ---
+  function updateMeasureUI() {
+    const pts = state.measure.points;
+    measureLine.setLatLngs(pts);
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) {
+      total += haversineMeters(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]);
+    }
+    $('measureVal').textContent = formatDistance(total);
+  }
+
+  // --- Sheets ---
+  function openSheet(id) {
+    closeAllSheets();
+    $(id).classList.add('open');
+  }
+
+  function closeAllSheets() {
+    document.querySelectorAll('.sheet-backdrop').forEach((el) => el.classList.remove('open'));
+  }
+
+  // --- Event Bindings ---
+  document.querySelectorAll('.dock-btn[data-sheet]').forEach((btn) => {
+    btn.addEventListener('click', () => openSheet(btn.dataset.sheet));
+  });
+  document.querySelectorAll('[data-close]').forEach((btn) => {
+    btn.addEventListener('click', closeAllSheets);
+  });
+  document.querySelectorAll('.sheet-backdrop').forEach((bg) => {
+    bg.addEventListener('click', (e) => {
+      if (e.target === bg) closeAllSheets();
+    });
+  });
+
+  $('hudSpeedBox').addEventListener('click', () => {
+    state.speedUnitIdx = (state.speedUnitIdx + 1) % 3;
+    updateHUD();
+  });
+
+  $('hudCoordsBox').addEventListener('click', () => {
+    const fmts = ['DD', 'DMS', 'DDM', 'UTM'];
+    state.coordFmt = fmts[(fmts.indexOf(state.coordFmt) + 1) % fmts.length];
+    $('cfgCoordFmt').value = state.coordFmt;
+    saveCfg();
+    updateHUD();
+  });
+
+  $('btnCopyCoordsNow').addEventListener('click', async () => {
+    if (state.lat == null) return showToast('Sem GPS.');
+    const txt = `${state.lat.toFixed(6)}, ${state.lon.toFixed(6)}`;
+    await navigator.clipboard.writeText(txt);
+    showToast(`Copiado: ${txt}`);
+  });
+
+  $('btnVoice').addEventListener('click', () => {
+    state.voiceOn = !state.voiceOn;
+    $('btnVoice').classList.toggle('active', state.voiceOn);
+    showToast(state.voiceOn ? 'Voz de navegação ligada' : 'Voz desligada');
+  });
+
+  $('btnWakeLock').addEventListener('click', async () => {
+    if (!('wakeLock' in navigator)) return showToast('Wake Lock não suportado.');
+    if (state.wakeLock) {
+      await state.wakeLock.release();
+      state.wakeLock = null;
+      $('btnWakeLock').classList.remove('active');
+      showToast('Ecrã pode apagar normalmente');
+    } else {
+      try {
+        state.wakeLock = await navigator.wakeLock.request('screen');
+        $('btnWakeLock').classList.add('active');
+        showToast('💡 Ecrã mantido sempre ligado');
+      } catch (_) {}
+    }
+  });
+
+  $('btnMirror').addEventListener('click', () => {
+    document.body.classList.toggle('hud-mirror');
+    $('btnMirror').classList.toggle('active');
+  });
+
+  $('btnTheme').addEventListener('click', () => {
+    document.body.classList.toggle('theme-day');
+    saveCfg();
+  });
+
+  $('btnFullscreen').addEventListener('click', () => {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+    else document.exitFullscreen?.();
+  });
+
+  $('btnLayerCycle').addEventListener('click', () => {
+    map.removeLayer(baseLayers[state.layerIdx].layer);
+    state.layerIdx = (state.layerIdx + 1) % baseLayers.length;
+    baseLayers[state.layerIdx].layer.addTo(map);
+    $('layerLabel').textContent = baseLayers[state.layerIdx].name;
+    showToast(`Mapa: ${baseLayers[state.layerIdx].name}`);
+  });
+
+  $('btnHeadingUp').addEventListener('click', () => {
+    state.headingUp = !state.headingUp;
+    $('btnHeadingUp').classList.toggle('active', state.headingUp);
+    if (!state.headingUp) $('mapa').style.transform = 'rotate(0deg)';
+    showToast(state.headingUp ? 'Modo Rumo em Cima (Heading-Up)' : 'Modo Norte em Cima');
+  });
+
+  $('btnCenterGps').addEventListener('click', () => {
+    state.autoFollow = true;
+    $('btnCenterGps').classList.add('active');
+    if (state.lat != null) map.setView([state.lat, state.lon], Math.max(map.getZoom(), 16));
+  });
+
+  $('btnParkCar').addEventListener('click', () => {
+    if (state.carPos && confirm('Carro já marcado! Quer navegar até ao carro? (Cancelar para atualizar posição atual)')) {
+      routeTo(state.carPos.lat, state.carPos.lon, 'Carro Estacionado');
+      return;
+    }
+    if (state.lat == null) return showToast('Sem GPS para marcar carro.');
+    state.carPos = { lat: state.lat, lon: state.lon, time: Date.now() };
+    localStorage.setItem(STORAGE_CAR, JSON.stringify(state.carPos));
+    renderWaypointsMap();
+    showToast('🚗 Posição do carro guardada!');
+  });
+
+  $('btnRouteToCar').addEventListener('click', () => {
+    if (state.carPos) routeTo(state.carPos.lat, state.carPos.lon, 'Carro Estacionado');
+  });
+
+  $('btnCancelNav').addEventListener('click', cancelNavigation);
+
+  $('routeModeChips').querySelectorAll('.chip').forEach((c) => {
+    c.addEventListener('click', () => {
+      $('routeModeChips').querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
+      c.classList.add('active');
+      state.nav.mode = c.dataset.mode;
+    });
+  });
+
+  $('btnSearchGo').addEventListener('click', () => searchLocation($('searchInput').value));
+  $('searchInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchLocation($('searchInput').value); });
+
+  $('btnStartRecSheet').addEventListener('click', startRecording);
+  $('btnRecPause').addEventListener('click', togglePauseRec);
+  $('btnRecStop').addEventListener('click', stopAndSaveRec);
+  $('importTrackFile').addEventListener('change', (e) => handleImportFile(e.target.files[0]));
+  $('btnCloseProfile').addEventListener('click', () => { $('trackProfileBox').style.display = 'none'; });
+
+  $('btnQuickSaveWpt').addEventListener('click', () => openSaveWpt());
+  $('btnAddWptHere').addEventListener('click', () => openSaveWpt());
+  $('btnExportAllGpx').addEventListener('click', () => {
+    downloadText('pontos_gps_terrestre.gpx', buildGPX({ waypoints: state.waypoints, tracks: state.tracks }), 'application/gpx+xml');
+  });
+
+  $('wptCatChips').querySelectorAll('.chip').forEach((c) => {
+    c.addEventListener('click', () => {
+      $('wptCatChips').querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
+      c.classList.add('active');
+    });
+  });
+
+  $('btnConfirmSaveWpt').addEventListener('click', () => {
+    if (!state.pendingWpt) return;
+    const catChip = $('wptCatChips').querySelector('.chip.active');
+    const w = {
+      id: Date.now(),
+      name: $('wptNameInput').value.trim() || 'Ponto Marcado',
+      category: catChip ? catChip.dataset.cat : '⭐',
+      notes: $('wptNotesInput').value.trim(),
+      lat: state.pendingWpt.lat,
+      lon: state.pendingWpt.lon,
+      ele: state.pendingWpt.ele
+    };
+    state.waypoints.unshift(w);
+    saveWaypoints();
+    renderWaypointsMap();
+    renderWaypointsList();
+    closeAllSheets();
+    showToast(`📍 "${w.name}" guardado!`);
+  });
+
+  $('wptFilterChips').querySelectorAll('.chip').forEach((c) => {
+    c.addEventListener('click', () => {
+      $('wptFilterChips').querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
+      c.classList.add('active');
+      state.wptFilter = c.dataset.cat;
+      renderWaypointsList();
+    });
+  });
+
+  $('btnResetTrip').addEventListener('click', () => {
+    state.trip = { odoMeters: 0, maxSpeedKmh: 0, movingSec: 0, gainMeters: 0, lastAlt: state.alt, lastPos: state.trip.lastPos, lastTime: Date.now() };
+    updateHUD();
+    showToast('Computador de bordo zerado');
+  });
+
+  $('btnToggleMeasure').addEventListener('click', () => {
+    state.measure.active = !state.measure.active;
+    $('measurePill').classList.toggle('visible', state.measure.active);
+    closeAllSheets();
+    showToast(state.measure.active ? 'Toque no mapa para medir distâncias' : 'Medição terminada');
+  });
+
+  $('btnMeasureUndo').addEventListener('click', () => {
+    state.measure.points.pop();
+    measureMarkers.clearLayers();
+    state.measure.points.forEach((p) => L.circleMarker(p, { radius: 5, color: '#f59e0b', fillOpacity: 1 }).addTo(measureMarkers));
+    updateMeasureUI();
+  });
+
+  $('btnMeasureClear').addEventListener('click', () => {
+    state.measure.points = [];
+    state.measure.active = false;
+    measureMarkers.clearLayers();
+    measureLine.setLatLngs([]);
+    $('measurePill').classList.remove('visible');
+  });
+
+  $('btnShareLoc').addEventListener('click', async () => {
+    if (state.lat == null) return showToast('A aguardar GPS...');
+    const url = `https://www.openstreetmap.org/?mlat=${state.lat.toFixed(6)}&mlon=${state.lon.toFixed(6)}#map=16/${state.lat.toFixed(6)}/${state.lon.toFixed(6)}`;
+    const text = `Minha posição GPS: ${state.lat.toFixed(6)}, ${state.lon.toFixed(6)} (Alt: ${state.alt != null ? Math.round(state.alt) + 'm' : '--'})\n${url}`;
+    if (navigator.share) {
+      try { await navigator.share({ title: 'Localização GPS', text, url }); } catch (_) {}
+    } else {
+      await navigator.clipboard.writeText(text);
+      showToast('Link e coordenadas copiados!');
+    }
+  });
+
+  $('cfgSpeedLimit').addEventListener('change', (e) => {
+    state.speedLimit = Math.max(0, Number(e.target.value) || 0);
+    saveCfg();
+  });
+
+  $('cfgCoordFmt').addEventListener('change', (e) => {
+    state.coordFmt = e.target.value;
+    saveCfg();
+    updateHUD();
+  });
+
+  // --- Painel GitHub & Sync Gist ---
+  const STORAGE_GH_TOKEN = 'gps_terrestre_gh_token';
+  const STORAGE_GH_GIST = 'gps_terrestre_gh_gist_id';
+
+  $('btnGithubPanel').addEventListener('click', () => {
+    const savedToken = localStorage.getItem(STORAGE_GH_TOKEN) || '';
+    if (savedToken) $('ghTokenInput').value = savedToken;
+    openSheet('sheetGithub');
+  });
+
+  $('btnCopyGhUrl').addEventListener('click', async () => {
+    const url = $('ghPagesUrl').href;
+    await navigator.clipboard.writeText(url);
+    showToast('Link GitHub Pages copiado!');
+  });
+
+  $('btnGhBackup').addEventListener('click', async () => {
+    const token = $('ghTokenInput').value.trim();
+    if (!token) return showToast('Introduza um token GitHub (permissão gist).');
+    localStorage.setItem(STORAGE_GH_TOKEN, token);
+    const statusEl = $('ghSyncStatus');
+    statusEl.textContent = 'A enviar backup para GitHub Gist...';
+    const payload = {
+      description: 'GPS Terrestre Pro - Backup Pontos e Percursos',
+      public: false,
+      files: {
+        'gps_terrestre_backup.json': {
+          content: JSON.stringify({
+            updatedAt: new Date().toISOString(),
+            waypoints: state.waypoints,
+            tracks: state.tracks,
+            carPos: state.carPos
+          }, null, 2)
+        }
+      }
+    };
+    try {
+      const gistId = localStorage.getItem(STORAGE_GH_GIST);
+      const endpoint = gistId ? `https://api.github.com/gists/${gistId}` : 'https://api.github.com/gists';
+      const method = gistId ? 'PATCH' : 'POST';
+      const res = await fetch(endpoint, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      localStorage.setItem(STORAGE_GH_GIST, data.id);
+      statusEl.textContent = `✅ Backup guardado (${new Date().toLocaleTimeString('pt-PT')})`;
+      showToast('Backup guardado no GitHub!');
+    } catch (err) {
+      statusEl.textContent = `❌ Erro no backup: ${err.message}`;
+    }
+  });
+
+  $('btnGhRestore').addEventListener('click', async () => {
+    const token = $('ghTokenInput').value.trim();
+    if (!token) return showToast('Introduza o token GitHub.');
+    localStorage.setItem(STORAGE_GH_TOKEN, token);
+    const statusEl = $('ghSyncStatus');
+    statusEl.textContent = 'A procurar backup no GitHub...';
+    try {
+      let gistId = localStorage.getItem(STORAGE_GH_GIST);
+      if (!gistId) {
+        const listRes = await fetch('https://api.github.com/gists?per_page=20', {
+          headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
+        });
+        const list = await listRes.json();
+        const found = (Array.isArray(list) ? list : []).find((g) => g.files && g.files['gps_terrestre_backup.json']);
+        if (!found) throw new Error('Nenhum backup encontrado.');
+        gistId = found.id;
+        localStorage.setItem(STORAGE_GH_GIST, gistId);
+      }
+      const res = await fetch(`https://api.github.com/gists/${gistId}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' }
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const raw = data.files['gps_terrestre_backup.json'].content;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed.waypoints)) state.waypoints = parsed.waypoints;
+      if (Array.isArray(parsed.tracks)) state.tracks = parsed.tracks;
+      if (parsed.carPos) {
+        state.carPos = parsed.carPos;
+        localStorage.setItem(STORAGE_CAR, JSON.stringify(state.carPos));
+      }
+      saveWaypoints();
+      saveTracks();
+      renderWaypointsMap();
+      renderWaypointsList();
+      renderTracksList();
+      statusEl.textContent = `✅ Restaurado (${state.waypoints.length} pontos, ${state.tracks.length} percursos)`;
+      showToast('Backup restaurado do GitHub!');
+    } catch (err) {
+      statusEl.textContent = `❌ Erro ao restaurar: ${err.message}`;
+    }
+  });
+
+  // Expose popup callbacks
+  window._gpsApp = { routeTo, openSaveWpt };
+
+  // Service Worker Registration
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  }
+
+  // Boot
+  loadStorage();
+  renderWaypointsMap();
+  renderWaypointsList();
+  renderTracksList();
+  initCompass();
+  startGPS();
+})();

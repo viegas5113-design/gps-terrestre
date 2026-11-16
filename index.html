@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>GPS Terrestre Pro</title>
+
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="static/icons/icon-192.png">
+  <link rel="icon" type="image/png" href="static/icons/icon-192.png">
+
+  <link rel="stylesheet" href="static/vendor/leaflet.css">
+  <link rel="stylesheet" href="static/vendor/MarkerCluster.css">
+  <link rel="stylesheet" href="static/vendor/MarkerCluster.Default.css">
+  <link rel="stylesheet" href="static/css/app.css">
+</head>
+<body>
+  <div id="app-container">
+    <!-- MAPA -->
+    <div id="mapa"></div>
+
+    <!-- BARRA SUPERIOR -->
+    <header class="top-bar">
+      <div class="top-brand">
+        <img class="top-logo" src="static/icons/icon-192.png" alt="GPS Terrestre">
+        <div class="top-title">
+          <strong>GPS Terrestre</strong>
+          <span id="layerLabel">OSM Estradas</span>
+        </div>
+      </div>
+
+      <div id="gpsBadge" class="gps-badge">
+        <div class="gps-dot"></div>
+        <span id="gpsBadgeTxt">A procurar GPS...</span>
+      </div>
+
+      <div class="top-actions">
+        <button id="btnGithubPanel" class="btn-icon active" title="Painel GitHub & QR Code">🐙</button>
+        <button id="btnVoice" class="btn-icon active" title="Voz de Navegação (PT)">🔊</button>
+        <button id="btnWakeLock" class="btn-icon" title="Manter Ecrã Ligado">💡</button>
+        <button id="btnMirror" class="btn-icon" title="Modo Espelho HUD (Para-brisas)">🪞</button>
+        <button id="btnTheme" class="btn-icon" title="Modo Dia / Noite">🌙</button>
+        <button id="btnFullscreen" class="btn-icon" title="Ecrã Completo">⛶</button>
+      </div>
+    </header>
+
+    <!-- HUD FLUTUANTE -->
+    <section class="hud-container">
+      <div id="hudCard" class="hud-card">
+        <div class="hud-grid">
+          <div id="hudSpeedBox" class="hud-item" style="cursor:pointer;" title="Tocar para mudar unidade">
+            <span class="hud-label">Velocidade</span>
+            <div class="hud-val-row">
+              <span id="hudSpeed" class="hud-big">0</span>
+              <span id="hudSpeedUnit" class="hud-unit">km/h</span>
+            </div>
+          </div>
+
+          <div class="hud-item">
+            <span class="hud-label">Rumo</span>
+            <div class="hud-val-row" style="color:#fbbf24;">
+              <span id="hudHeading" class="hud-big">---°</span>
+              <span id="hudCardinal" class="hud-unit" style="color:#fbbf24;">N</span>
+            </div>
+          </div>
+
+          <div id="hudCoordsBox" class="hud-item" title="Tocar para mudar formato / segurar para copiar">
+            <span class="hud-label">Posição (<span id="hudCoordFmt">DD</span>)</span>
+            <div id="hudCoords" class="hud-coords">
+              <div>--° --' --"</div>
+              <div>--° --' --"</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="hud-extra">
+          <span>Alt: <b id="hudAlt">-- m</b></span>
+          <span>Subida: <b id="hudGain">+0 m</b></span>
+          <span>Prec: <b id="hudAcc">±-- m</b></span>
+          <span>Odóm: <b id="hudOdo">0.00 km</b></span>
+        </div>
+      </div>
+
+      <!-- BANNER NAVEGAÇÃO TURN-BY-TURN -->
+      <div id="navBanner" class="nav-banner">
+        <div class="nav-top">
+          <div class="nav-maneuver">
+            <div id="navIcon" class="nav-icon">⬆️</div>
+            <div>
+              <div id="navInstr" class="nav-instr">Siga em frente</div>
+              <div id="navSub" class="nav-sub">Destino: --</div>
+            </div>
+          </div>
+          <button id="btnCancelNav" class="sheet-close" title="Terminar Rota">✕</button>
+        </div>
+        <div class="nav-stats">
+          <div>
+            <div id="navDist" class="nav-stat-val">-- km</div>
+            <div class="nav-stat-lbl">Distância</div>
+          </div>
+          <div>
+            <div id="navEtr" class="nav-stat-val">-- min</div>
+            <div class="nav-stat-lbl">Tempo Rest.</div>
+          </div>
+          <div>
+            <div id="navEta" class="nav-stat-val">--:--</div>
+            <div class="nav-stat-lbl">Chegada (ETA)</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- BARRA GRAVAÇÃO DE PERCURSO -->
+      <div id="recBar" class="rec-bar">
+        <div>
+          <span class="rec-dot"></span>
+          <strong id="recStatusTxt">A gravar</strong> ·
+          <span id="recDist">0.00 km</span> ·
+          <span id="recTime">00:00</span> ·
+          <span id="recGain">+0m</span>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button id="btnRecPause" class="btn btn-sm">⏸</button>
+          <button id="btnRecStop" class="btn btn-sm btn-danger">⏹ Guardar</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- BOTÕES FLUTUANTES NO MAPA -->
+    <div class="map-fab-col">
+      <button id="btnLayerCycle" class="fab-btn" title="Mudar Tipo de Mapa">🗺️</button>
+      <button id="btnHeadingUp" class="fab-btn" title="Orientação Norte / Rumo">🧭</button>
+      <button id="btnCenterGps" class="fab-btn active" title="Centrar na Minha Posição">🎯</button>
+      <button id="btnParkCar" class="fab-btn" title="Marcar / Voltar ao Carro">🚗</button>
+    </div>
+
+    <!-- PILL DE MEDIÇÃO -->
+    <div id="measurePill" class="measure-pill">
+      <span>📏 <span id="measureVal">0 m</span></span>
+      <button id="btnMeasureUndo" class="btn btn-sm">↩</button>
+      <button id="btnMeasureClear" class="btn btn-sm btn-danger">✕</button>
+    </div>
+
+    <!-- DOCK INFERIOR -->
+    <nav class="bottom-dock">
+      <button class="dock-btn" data-sheet="sheetRoute">
+        <span class="ico">🔍</span>
+        <span>Rotas</span>
+      </button>
+      <button id="dockRecBtn" class="dock-btn" data-sheet="sheetTracks">
+        <span class="ico">⏺️</span>
+        <span>Percursos</span>
+      </button>
+      <button class="dock-btn" id="btnQuickSaveWpt">
+        <span class="ico">📍</span>
+        <span>Marcar</span>
+      </button>
+      <button class="dock-btn" data-sheet="sheetWaypoints">
+        <span class="ico">⭐</span>
+        <span>Pontos</span>
+      </button>
+      <button class="dock-btn" data-sheet="sheetInstruments">
+        <span class="ico">🧭</span>
+        <span>Instrumentos</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- SHEET: PESQUISA & ROTAS -->
+  <div id="sheetRoute" class="sheet-backdrop">
+    <div class="sheet">
+      <div class="sheet-header">
+        <h3>🔍 Pesquisa & Rotas Turn-by-Turn</h3>
+        <button class="sheet-close" data-close>✕</button>
+      </div>
+      <div class="sheet-body">
+        <div class="chip-row" id="routeModeChips">
+          <button class="chip active" data-mode="driving">🚗 Carro</button>
+          <button class="chip" data-mode="cycling">🚴 Bicicleta</button>
+          <button class="chip" data-mode="foot">🥾 Caminhada</button>
+          <button class="chip" data-mode="direct">🧭 Linha Reta</button>
+        </div>
+
+        <div class="input-row">
+          <input id="searchInput" class="input" type="search" placeholder="Morada, cidade, trilho ou lat,lon...">
+          <button id="btnSearchGo" class="btn btn-primary">Ir</button>
+        </div>
+
+        <div id="quickCarBox" class="list-card" style="display:none;">
+          <div class="list-card-top">
+            <div>
+              <div class="list-card-title">🚗 Carro Estacionado</div>
+              <div id="quickCarSub" class="list-card-sub">--</div>
+            </div>
+            <button id="btnRouteToCar" class="btn btn-sm btn-primary">Guiar até lá</button>
+          </div>
+        </div>
+
+        <div id="searchResults" style="display:flex;flex-direction:column;gap:8px;"></div>
+
+        <div id="routeStepsBox" style="display:none;">
+          <h4 style="margin:4px 0 8px;">Instruções da Rota</h4>
+          <div id="routeStepsList" style="display:flex;flex-direction:column;gap:6px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SHEET: PERCURSOS (TRACKS) -->
+  <div id="sheetTracks" class="sheet-backdrop">
+    <div class="sheet">
+      <div class="sheet-header">
+        <h3>🥾 Gravador & Percursos GPX</h3>
+        <button class="sheet-close" data-close>✕</button>
+      </div>
+      <div class="sheet-body">
+        <div class="input-row">
+          <button id="btnStartRecSheet" class="btn btn-primary" style="flex:1;">⏺️ Iniciar Gravação</button>
+          <label class="btn" style="cursor:pointer;">
+            📥 Importar GPX/KML
+            <input id="importTrackFile" type="file" accept=".gpx,.kml,.geojson,.json" style="display:none;">
+          </label>
+        </div>
+
+        <div id="trackProfileBox" class="list-card" style="display:none;">
+          <div class="list-card-top">
+            <strong id="profileTitle">Perfil de Elevação</strong>
+            <button id="btnCloseProfile" class="btn btn-sm">✕</button>
+          </div>
+          <div id="profileSvg"></div>
+        </div>
+
+        <div id="tracksList" style="display:flex;flex-direction:column;gap:8px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SHEET: PONTOS & GPX -->
+  <div id="sheetWaypoints" class="sheet-backdrop">
+    <div class="sheet">
+      <div class="sheet-header">
+        <h3>⭐ Pontos Guardados & GPX</h3>
+        <button class="sheet-close" data-close>✕</button>
+      </div>
+      <div class="sheet-body">
+        <div class="input-row">
+          <button id="btnAddWptHere" class="btn btn-primary" style="flex:1;">📍 Guardar Posição Atual</button>
+          <button id="btnExportAllGpx" class="btn">📤 Exportar GPX</button>
+        </div>
+
+        <div class="chip-row" id="wptFilterChips">
+          <button class="chip active" data-cat="all">Todos</button>
+          <button class="chip" data-cat="🚗">🚗 Carro</button>
+          <button class="chip" data-cat="🏠">🏠 Casa</button>
+          <button class="chip" data-cat="🏔️">🏔️ Trilho</button>
+          <button class="chip" data-cat="⛺">⛺ Campismo</button>
+          <button class="chip" data-cat="⭐">⭐ Favoritos</button>
+        </div>
+
+        <div id="waypointsList" style="display:flex;flex-direction:column;gap:8px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SHEET: INSTRUMENTOS (BÚSSOLA, ALTÍMETRO, COMPUTADOR DE BORDO, FERRAMENTAS) -->
+  <div id="sheetInstruments" class="sheet-backdrop">
+    <div class="sheet">
+      <div class="sheet-header">
+        <h3>🧭 Bússola, Computador & Ferramentas</h3>
+        <button class="sheet-close" data-close>✕</button>
+      </div>
+      <div class="sheet-body">
+        <div class="compass-wrap">
+          <div class="compass-rose">
+            <div id="compassDial" class="compass-dial">
+              <span class="compass-n">N</span>
+              <span class="compass-e">E</span>
+              <span class="compass-s">S</span>
+              <span class="compass-w">W</span>
+            </div>
+            <div class="compass-center">
+              <div id="instHeading" class="compass-deg">---°</div>
+              <div id="instCardinal" style="color:var(--accent);font-weight:700;">--</div>
+            </div>
+          </div>
+          <button id="btnCalibrateCompass" class="btn btn-sm">🧭 Ativar Sensor Bússola (iOS/Android)</button>
+        </div>
+
+        <div class="stats-grid-2">
+          <div class="stat-box"><div class="lbl">Odómetro Viagem</div><div id="tripOdo" class="val">0.00 km</div></div>
+          <div class="stat-box"><div class="lbl">Velocidade Máx.</div><div id="tripMaxSpd" class="val">0 km/h</div></div>
+          <div class="stat-box"><div class="lbl">Velocidade Média</div><div id="tripAvgSpd" class="val">0 km/h</div></div>
+          <div class="stat-box"><div class="lbl">Tempo em Movimento</div><div id="tripMoveTime" class="val">00:00</div></div>
+          <div class="stat-box"><div class="lbl">Altitude / Subida</div><div id="instAltGain" class="val">-- m / +0m</div></div>
+          <div class="stat-box"><div class="lbl">Nascer / Pôr do Sol</div><div id="instSun" class="val">--:-- / --:--</div></div>
+        </div>
+
+        <div class="input-row">
+          <button id="btnResetTrip" class="btn btn-danger" style="flex:1;">🔄 Zerar Viagem</button>
+          <button id="btnToggleMeasure" class="btn" style="flex:1;">📏 Medir no Mapa</button>
+        </div>
+
+        <div class="list-card">
+          <div class="list-card-title">🆘 Partilhar Localização / SOS</div>
+          <div class="list-card-sub">Envia coordenadas exatas e link de mapa por WhatsApp, SMS ou área de transferência.</div>
+          <button id="btnShareLoc" class="btn btn-primary" style="margin-top:6px;">📤 Partilhar Minha Posição</button>
+        </div>
+
+        <div class="list-card">
+          <div class="list-card-title">⚙️ Definições & Alertas</div>
+          <label style="font-size:12px;color:var(--muted);margin-top:4px;">Alerta de Limite de Velocidade (km/h, 0 = desligado)</label>
+          <input id="cfgSpeedLimit" class="input" type="number" min="0" max="250" value="0">
+          <label style="font-size:12px;color:var(--muted);margin-top:4px;">Formato de Coordenadas</label>
+          <select id="cfgCoordFmt" class="input">
+            <option value="DD">Graus Decimais (DD)</option>
+            <option value="DMS">Graus, Minutos, Segundos (DMS)</option>
+            <option value="DDM">Graus e Minutos Decimais (DDM)</option>
+            <option value="UTM">UTM (Métrico)</option>
+          </select>
+          <button id="btnCopyCoordsNow" class="btn" style="margin-top:6px;">📋 Copiar Coordenadas Atuais</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: GUARDAR WAYPOINT -->
+  <div id="sheetAddWpt" class="sheet-backdrop">
+    <div class="sheet">
+      <div class="sheet-header">
+        <h3>📍 Guardar Ponto</h3>
+        <button class="sheet-close" data-close>✕</button>
+      </div>
+      <div class="sheet-body">
+        <input id="wptNameInput" class="input" placeholder="Nome do ponto (ex: Miradouro, Casa, Carro...)">
+        <div class="chip-row" id="wptCatChips">
+          <button class="chip active" data-cat="⭐">⭐ Favorito</button>
+          <button class="chip" data-cat="🚗">🚗 Carro</button>
+          <button class="chip" data-cat="🏠">🏠 Casa</button>
+          <button class="chip" data-cat="🏔️">🏔️ Trilho</button>
+          <button class="chip" data-cat="⛺">⛺ Campismo</button>
+          <button class="chip" data-cat="⚠️">⚠️ Perigo</button>
+        </div>
+        <textarea id="wptNotesInput" rows="2" placeholder="Notas opcionais..."></textarea>
+        <div id="wptCoordPreview" class="list-card-sub">--</div>
+        <button id="btnConfirmSaveWpt" class="btn btn-primary">💾 Guardar Ponto</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: PAINEL GITHUB & TELEMÓVEL -->
+  <div id="sheetGithub" class="sheet-backdrop">
+    <div class="sheet">
+      <div class="sheet-header">
+        <h3>🐙 Painel Ligado ao GitHub</h3>
+        <button class="sheet-close" data-close>✕</button>
+      </div>
+      <div class="sheet-body">
+        <div class="list-card" style="border-color:var(--accent);">
+          <div class="list-card-title">🌐 App Online Permanente (HTTPS)</div>
+          <div class="list-card-sub" style="word-break:break-all;">
+            Repositório: <a href="https://github.com/viegas5113-design/gps-terrestre" target="_blank" style="color:var(--accent-2);">viegas5113-design/gps-terrestre</a>
+          </div>
+          <div class="list-card-sub" style="word-break:break-all;margin-top:4px;">
+            Link Telemóvel: <a id="ghPagesUrl" href="https://viegas5113-design.github.io/gps-terrestre/" target="_blank" style="color:var(--accent);font-weight:700;">https://viegas5113-design.github.io/gps-terrestre/</a>
+          </div>
+          <div class="input-row" style="margin-top:8px;">
+            <button id="btnCopyGhUrl" class="btn btn-primary" style="flex:1;">📋 Copiar Link</button>
+            <a href="https://viegas5113-design.github.io/gps-terrestre/" target="_blank" class="btn" style="text-decoration:none;">🔗 Abrir</a>
+          </div>
+        </div>
+
+        <div class="list-card" style="align-items:center;text-align:center;">
+          <div class="list-card-title">📱 Aponte a Câmara do Telemóvel</div>
+          <img src="static/qrcode_github.png" alt="QR Code GitHub Pages" style="width:170px;height:170px;border-radius:10px;background:#fff;padding:6px;margin:6px 0;">
+          <div class="list-card-sub">Depois de abrir no telemóvel, escolha "Instalar Aplicação" ou "Adicionar ao Ecrã Principal".</div>
+        </div>
+
+        <div class="list-card">
+          <div class="list-card-title">☁️ Backup & Sincronização GitHub Gist</div>
+          <div class="list-card-sub">Guarde ou restaure os seus Pontos e Percursos na sua conta GitHub (opcional).</div>
+          <input id="ghTokenInput" class="input" type="password" placeholder="Token GitHub (ghp_... / gho_... com permissão gist)" style="margin-top:6px;">
+          <div class="input-row" style="margin-top:6px;">
+            <button id="btnGhBackup" class="btn btn-primary" style="flex:1;">⬆️ Guardar Backup</button>
+            <button id="btnGhRestore" class="btn" style="flex:1;">⬇️ Restaurar</button>
+          </div>
+          <div id="ghSyncStatus" class="list-card-sub" style="margin-top:4px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="static/vendor/leaflet.js"></script>
+  <script src="static/vendor/leaflet.markercluster.js"></script>
+  <script src="static/vendor/togeojson.umd.js"></script>
+  <script src="static/js/geo_utils.js"></script>
+  <script src="static/js/app.js"></script>
+</body>
+</html>
