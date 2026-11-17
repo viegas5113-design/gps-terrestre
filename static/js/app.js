@@ -118,6 +118,42 @@
     if ($('cfgAutoRecordTracks')) $('cfgAutoRecordTracks').checked = !!state.autoRecord;
   }
 
+  function syncRouteAndRecUI() {
+    const btnRoute = $('btnSearchGo');
+    if (btnRoute) {
+      if (state.nav.active) {
+        btnRoute.textContent = '❌ Parar Rota';
+        btnRoute.className = 'btn btn-danger';
+      } else {
+        btnRoute.textContent = '▶️ Iniciar';
+        btnRoute.className = 'btn btn-primary';
+      }
+    }
+
+    const btnRec = $('btnStartRecSheet');
+    if (btnRec) {
+      if (state.rec.active) {
+        btnRec.textContent = '⏹ Desligar';
+        btnRec.className = 'btn btn-danger';
+      } else {
+        btnRec.textContent = '⏺️ Gravar';
+        btnRec.className = 'btn btn-primary';
+      }
+    }
+
+    const btnClearRoute = $('btnClearRouteMap');
+    if (btnClearRoute) {
+      const hasPath = Boolean(
+        state.nav.active ||
+        destMarker ||
+        routePolyline.getLatLngs().length > 0 ||
+        directLine.getLatLngs().length > 0 ||
+        importedTrackLayer.getLatLngs().length > 0
+      );
+      btnClearRoute.style.display = hasPath ? 'inline-flex' : 'none';
+    }
+  }
+
   function loadStorage() {
     try {
       state.waypoints = JSON.parse(localStorage.getItem(STORAGE_WPTS) || '[]');
@@ -205,6 +241,7 @@
   const routePolyline = L.polyline([], { color: '#10b981', weight: 5, opacity: 0.9 }).addTo(map);
   const directLine = L.polyline([], { color: '#38bdf8', weight: 3, dashArray: '8,8' }).addTo(map);
   const importedTrackLayer = L.polyline([], { color: '#f59e0b', weight: 4, opacity: 0.9 }).addTo(map);
+  let destMarker = null;
   const measureLine = L.polyline([], { color: '#f59e0b', weight: 3, dashArray: '6,6' }).addTo(map);
   const measureMarkers = L.layerGroup().addTo(map);
 
@@ -673,6 +710,11 @@
     state.nav.lastSpokenIdx = -1;
     state.nav.stepIdx = 0;
 
+    if (destMarker) map.removeLayer(destMarker);
+    destMarker = L.marker([destLat, destLon], {
+      icon: L.divIcon({ className: 'dest-pin', iconSize: [28, 28], iconAnchor: [14, 24], html: '<div style="font-size:22px;filter:drop-shadow(0 2px 3px rgba(0,0,0,0.6));">🏁</div>' })
+    }).addTo(map).bindPopup(`<strong>🏁 ${escapeHtml(destName)}</strong>`);
+
     if (state.autoRecord && !state.rec.active) {
       startRecording({ silent: true });
     }
@@ -683,6 +725,7 @@
       state.nav.steps = [];
       $('navBanner').classList.add('visible');
       updateNavigationProgress();
+      syncRouteAndRecUI();
       speakPT(`A navegar em linha reta para ${destName}`);
       return;
     }
@@ -710,6 +753,7 @@
       renderRouteSteps(state.nav.steps);
       $('navBanner').classList.add('visible');
       updateNavigationProgress();
+      syncRouteAndRecUI();
       speakPT(`Rota calculada para ${destName}. ${formatDistance(route.distance)}.`);
     } catch (e) {
       // Fallback to direct bearing
@@ -717,6 +761,7 @@
       directLine.setLatLngs([[state.lat, state.lon], [destLat, destLon]]);
       $('navBanner').classList.add('visible');
       updateNavigationProgress();
+      syncRouteAndRecUI();
       showToast('Rota online indisponível. A usar linha reta.');
     }
   }
@@ -815,12 +860,24 @@
     }
   }
 
-  function cancelNavigation() {
+  function cancelNavigation(opts = {}) {
     state.nav.active = false;
+    state.nav.target = null;
+    state.nav.steps = [];
+    state.nav.routeCoords = [];
     routePolyline.setLatLngs([]);
     directLine.setLatLngs([]);
+    importedTrackLayer.setLatLngs([]);
+    if (destMarker) {
+      map.removeLayer(destMarker);
+      destMarker = null;
+    }
     $('navBanner').classList.remove('visible');
     $('routeStepsBox').style.display = 'none';
+    if (opts && opts.discardRec && state.rec.active) {
+      discardRecording(true);
+    }
+    syncRouteAndRecUI();
   }
 
   // --- Track Recorder ---
@@ -862,6 +919,20 @@
       closeAllSheets();
       showToast('⏺️ Gravação de percurso iniciada');
     }
+    syncRouteAndRecUI();
+  }
+
+  function discardRecording(quiet = false) {
+    if (!state.rec.active) return;
+    clearInterval(state.rec.timerId);
+    state.rec.active = false;
+    state.rec.paused = false;
+    recPolyline.setLatLngs([]);
+    $('recBar').classList.remove('visible');
+    $('dockRecBtn').classList.remove('recording');
+    syncRouteAndRecUI();
+    syncRouteAndRecUI();
+    if (!quiet) showToast('⏹ Gravação desligada');
   }
 
   function togglePauseRec() {
@@ -877,6 +948,7 @@
     state.rec.active = false;
     $('recBar').classList.remove('visible');
     $('dockRecBtn').classList.remove('recording');
+    syncRouteAndRecUI();
 
     const isAuto = Boolean(opts && opts.auto);
     if (isAuto && state.rec.points.length === 1 && state.lat != null) {
@@ -909,6 +981,7 @@
     });
     saveTracks();
     renderTracksList();
+    syncRouteAndRecUI();
     if (!isAuto) {
       showToast(`💾 Percurso "${name}" guardado!`);
     }
@@ -944,6 +1017,7 @@
         const latlngs = t.points.map((p) => [p.lat, p.lon]);
         importedTrackLayer.setLatLngs(latlngs);
         map.fitBounds(importedTrackLayer.getBounds(), { padding: [40, 40] });
+        syncRouteAndRecUI();
         closeAllSheets();
       };
       div.querySelector('[data-act="profile"]').onclick = () => {
@@ -1283,7 +1357,17 @@
   if ($('btnClearCar')) $('btnClearCar').addEventListener('click', clearCar);
   if ($('btnClearCarMap')) $('btnClearCarMap').addEventListener('click', clearCar);
 
-  $('btnCancelNav').addEventListener('click', cancelNavigation);
+  $('btnCancelNav').addEventListener('click', () => {
+    cancelNavigation({ discardRec: true });
+    showToast('❌ Rota parada');
+  });
+
+  if ($('btnClearRouteMap')) {
+    $('btnClearRouteMap').addEventListener('click', () => {
+      cancelNavigation({ discardRec: true });
+      showToast('❌ Caminho limpo do mapa');
+    });
+  }
 
   $('routeModeChips').querySelectorAll('.chip').forEach((c) => {
     c.addEventListener('click', () => {
@@ -1295,6 +1379,11 @@
 
   $('btnSearchGo').addEventListener('click', () => {
     clearTimeout(searchDebounceTimer);
+    if (state.nav.active) {
+      cancelNavigation({ discardRec: true });
+      showToast('❌ Rota parada');
+      return;
+    }
     searchLocation($('searchInput').value);
   });
   $('searchInput').addEventListener('keydown', (e) => {
@@ -1315,9 +1404,18 @@
     }
   });
 
-  $('btnStartRecSheet').addEventListener('click', () => startRecording());
+  $('btnStartRecSheet').addEventListener('click', () => {
+    if (state.rec.active) {
+      discardRecording();
+    } else {
+      startRecording();
+    }
+  });
   $('btnRecPause').addEventListener('click', togglePauseRec);
   $('btnRecStop').addEventListener('click', () => stopAndSaveRec());
+  if ($('btnRecDiscard')) {
+    $('btnRecDiscard').addEventListener('click', () => discardRecording());
+  }
   if ($('arrivalBanner')) {
     $('arrivalBanner').addEventListener('click', () => $('arrivalBanner').classList.remove('visible'));
   }

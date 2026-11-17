@@ -124,7 +124,8 @@
         </div>
         <div style="display:flex;gap:6px;">
           <button id="btnRecPause" class="btn btn-sm">⏸</button>
-          <button id="btnRecStop" class="btn btn-sm btn-danger">⏹ Guardar</button>
+          <button id="btnRecStop" class="btn btn-sm btn-primary">⏹ Guardar</button>
+          <button id="btnRecDiscard" class="btn btn-sm btn-danger" title="Parar e descartar gravação">⏹ Desligar</button>
         </div>
       </div>
 
@@ -143,6 +144,7 @@
     </div>
 
     <button id="btnClearCarMap" class="car-clear-pill" style="display:none;" title="Apagar marcador do carro estacionado">❌ Tirar Carro</button>
+    <button id="btnClearRouteMap" class="route-clear-pill" style="display:none;" title="Limpar rota e pré-visualização do mapa">❌ Desligar Caminho</button>
 
     <!-- PILL DE MEDIÇÃO -->
     <div id="measurePill" class="measure-pill">
@@ -193,7 +195,7 @@
 
         <div class="input-row">
           <input id="searchInput" class="input" type="search" placeholder="Morada, rua, loja, cidade ou lat,lon...">
-          <button id="btnSearchGo" class="btn btn-primary">Ir</button>
+          <button id="btnSearchGo" class="btn btn-primary">▶️ Iniciar</button>
         </div>
 
         <div id="searchResults" style="display:flex;flex-direction:column;gap:8px;"></div>
@@ -228,7 +230,7 @@
       </div>
       <div class="sheet-body">
         <div class="input-row">
-          <button id="btnStartRecSheet" class="btn btn-primary" style="flex:1;">⏺️ Iniciar Gravação</button>
+          <button id="btnStartRecSheet" class="btn btn-primary" style="flex:1;">⏺️ Gravar</button>
           <label class="btn" style="cursor:pointer;">
             📥 Importar GPX/KML
             <input id="importTrackFile" type="file" accept=".gpx,.kml,.geojson,.json" style="display:none;">
