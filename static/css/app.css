@@ -24,6 +24,11 @@ body.theme-day {
   --muted: #475569;
 }
 
+body.night-drive .leaflet-tile-pane {
+  filter: brightness(0.68) contrast(1.08) saturate(0.85);
+  transition: filter 0.3s ease;
+}
+
 body.hud-mirror #hudCard {
   transform: scaleX(-1);
 }
@@ -526,6 +531,115 @@ html, body {
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(8px);
   cursor: pointer;
+}
+
+/* Quick Favorites Bar */
+.fav-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0;
+}
+.fav-bar::-webkit-scrollbar {
+  display: none;
+}
+.fav-chips-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.fav-chip {
+  flex-shrink: 0;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+}
+.fav-chip:active {
+  transform: scale(0.96);
+}
+.fav-add {
+  border-color: rgba(16, 185, 129, 0.6);
+  color: var(--accent);
+}
+
+/* Speed Limit Sign & Radar Badge */
+.speed-sign-wrap {
+  position: absolute;
+  left: 10px;
+  bottom: calc(136px + var(--safe-bottom));
+  z-index: 440;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.speed-sign {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 6px solid #dc2626;
+  color: #0f172a;
+  font-size: 20px;
+  font-weight: 900;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+.speed-sign.overspeed {
+  background: #dc2626;
+  color: #ffffff;
+  border-color: #fecaca;
+  animation: pulse 0.9s infinite;
+}
+.radar-badge {
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(185, 28, 28, 0.94);
+  border: 1px solid #fca5a5;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* Quick Share Location Pill */
+.share-quick-pill {
+  position: absolute;
+  right: 64px;
+  bottom: calc(136px + var(--safe-bottom));
+  z-index: 440;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(56, 189, 248, 0.65);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+}
+.share-quick-pill:active {
+  transform: scale(0.97);
 }
 
 .search-result-card {

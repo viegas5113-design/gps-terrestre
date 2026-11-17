@@ -21,6 +21,8 @@
   const STORAGE_TRACKS = 'gps_terrestre_tracks_v1';
   const STORAGE_CFG = 'gps_terrestre_cfg_v1';
   const STORAGE_CAR = 'gps_terrestre_car_v1';
+  const STORAGE_FAVS = 'gps_terrestre_favs_v1';
+  const STORAGE_ROAD_CACHE = 'gps_terrestre_road_cache_v1';
 
   const state = {
     lat: null,
@@ -36,7 +38,14 @@
     speedUnitIdx: 0, // 0=km/h, 1=mph, 2=m/s
     coordFmt: 'DD',
     speedLimit: 0,
+    roadSpeedLimit: 0,
+    nearestRadarDist: null,
+    muteSpeedAlert: false,
     lastSpeedBeep: 0,
+    lastRadarBeep: 0,
+    autoNightMode: true,
+    manualTheme: null,
+    fuelConsumption: 6.0,
     layerIdx: 0,
     wakeLock: null,
 
@@ -89,6 +98,7 @@
 
     waypoints: [],
     tracks: [],
+    favorites: [],
     carPos: null,
     autoRecord: true
   };
@@ -154,23 +164,58 @@
     }
   }
 
+  function applyNightMode() {
+    let isNight;
+    if (state.manualTheme === 'day' || state.manualTheme === 'night') {
+      isNight = state.manualTheme === 'night';
+    } else if (state.autoNightMode) {
+      const lat = state.lat != null ? state.lat : 37.10;
+      const lon = state.lon != null ? state.lon : -8.67;
+      const sun = calcSunTimes(lat, lon, new Date());
+      const now = new Date();
+      const nowHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      if (sun.sunrise !== '--:--' && sun.sunset !== '--:--') {
+        isNight = nowHHMM >= sun.sunset || nowHHMM < sun.sunrise;
+      } else {
+        const h = now.getHours();
+        isNight = h >= 19 || h < 7;
+      }
+    } else {
+      isNight = !document.body.classList.contains('theme-day');
+    }
+    document.body.classList.toggle('theme-day', !isNight);
+    document.body.classList.toggle('night-drive', isNight);
+    if ($('btnTheme')) {
+      $('btnTheme').textContent = isNight ? '☀️' : '🌙';
+      $('btnTheme').title = isNight ? 'Mudar para Modo Dia' : 'Mudar para Modo Noite';
+    }
+  }
+
   function loadStorage() {
     try {
       state.waypoints = JSON.parse(localStorage.getItem(STORAGE_WPTS) || '[]');
       state.tracks = JSON.parse(localStorage.getItem(STORAGE_TRACKS) || '[]');
+      state.favorites = JSON.parse(localStorage.getItem(STORAGE_FAVS) || '[]');
       state.carPos = JSON.parse(localStorage.getItem(STORAGE_CAR) || 'null');
       const cfg = JSON.parse(localStorage.getItem(STORAGE_CFG) || '{}');
       if (cfg.coordFmt) state.coordFmt = cfg.coordFmt;
       if (cfg.speedLimit != null) state.speedLimit = Number(cfg.speedLimit) || 0;
       if (cfg.autoRecord != null) state.autoRecord = Boolean(cfg.autoRecord);
-      if (cfg.theme === 'day') document.body.classList.add('theme-day');
+      if (cfg.muteSpeedAlert != null) state.muteSpeedAlert = Boolean(cfg.muteSpeedAlert);
+      if (cfg.autoNightMode != null) state.autoNightMode = Boolean(cfg.autoNightMode);
+      if (cfg.manualTheme) state.manualTheme = cfg.manualTheme;
+      if (cfg.fuelConsumption != null) state.fuelConsumption = Math.max(0.5, Number(cfg.fuelConsumption) || 6.0);
     } catch (e) {
       console.warn('Erro ao ler localStorage', e);
     }
     $('cfgCoordFmt').value = state.coordFmt;
     $('cfgSpeedLimit').value = state.speedLimit;
+    if ($('cfgMuteSpeedAlert')) $('cfgMuteSpeedAlert').checked = !!state.muteSpeedAlert;
+    if ($('cfgAutoNight')) $('cfgAutoNight').checked = !!state.autoNightMode;
+    if ($('cfgFuelConsumption')) $('cfgFuelConsumption').value = state.fuelConsumption.toFixed(1);
     $('hudCoordFmt').textContent = state.coordFmt;
     syncAutoRecordUI();
+    applyNightMode();
   }
 
   function saveWaypoints() {
@@ -181,6 +226,10 @@
     localStorage.setItem(STORAGE_TRACKS, JSON.stringify(state.tracks));
   }
 
+  function saveFavorites() {
+    localStorage.setItem(STORAGE_FAVS, JSON.stringify(state.favorites));
+  }
+
   function saveCfg() {
     localStorage.setItem(
       STORAGE_CFG,
@@ -188,6 +237,10 @@
         coordFmt: state.coordFmt,
         speedLimit: state.speedLimit,
         autoRecord: state.autoRecord,
+        muteSpeedAlert: state.muteSpeedAlert,
+        autoNightMode: state.autoNightMode,
+        manualTheme: state.manualTheme,
+        fuelConsumption: state.fuelConsumption,
         theme: document.body.classList.contains('theme-day') ? 'day' : 'night'
       })
     );
@@ -295,18 +348,140 @@
 
   // --- Audio & Voice ---
   function beepAlert() {
+    if (state.muteSpeedAlert) return;
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
       osc.frequency.value = 880;
-      gain.gain.value = 0.15;
+      gain.gain.value = 0.12;
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start();
-      setTimeout(() => { osc.stop(); ctx.close(); }, 220);
+      setTimeout(() => { osc.stop(); ctx.close(); }, 180);
     } catch (_) {}
+  }
+
+  // --- Road Speed Limit & Speed Cameras (Overpass OSM + Cache) ---
+  let lastRoadQueryPos = null;
+  let lastRoadQueryTime = 0;
+  let roadCacheMem = null;
+
+  function getRoadCache() {
+    if (roadCacheMem) return roadCacheMem;
+    try {
+      roadCacheMem = JSON.parse(localStorage.getItem(STORAGE_ROAD_CACHE) || '{}');
+    } catch (_) {
+      roadCacheMem = {};
+    }
+    return roadCacheMem;
+  }
+
+  function parseOsmMaxspeed(val) {
+    if (!val) return 0;
+    const s = String(val).trim().toLowerCase();
+    if (s === 'pt:urban' || s === 'urban') return 50;
+    if (s === 'pt:rural' || s === 'rural') return 90;
+    if (s === 'pt:motorway' || s === 'motorway') return 120;
+    const m = s.match(/(\d+)/);
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  function applyRoadInfo(info, lat, lon) {
+    state.roadSpeedLimit = info.maxspeed || 0;
+    let nearest = null;
+    if (Array.isArray(info.cameras)) {
+      info.cameras.forEach((c) => {
+        const d = haversineMeters(lat, lon, c.lat, c.lon);
+        if (d <= 600 && (nearest == null || d < nearest)) nearest = d;
+      });
+    }
+    state.nearestRadarDist = nearest;
+    updateSpeedAndRadarUI(state.speedKmh);
+  }
+
+  async function fetchRoadLimitsAndRadars(lat, lon) {
+    const now = Date.now();
+    const moved = lastRoadQueryPos ? haversineMeters(lastRoadQueryPos.lat, lastRoadQueryPos.lon, lat, lon) : 9999;
+    if (moved < 220 && now - lastRoadQueryTime < 25000) return;
+
+    const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+    const cache = getRoadCache();
+    const cached = cache[key];
+    if (cached && now - cached.ts < 86400000) {
+      lastRoadQueryPos = { lat, lon };
+      lastRoadQueryTime = now;
+      applyRoadInfo(cached, lat, lon);
+      return;
+    }
+
+    if (navigator.onLine === false) return;
+    lastRoadQueryPos = { lat, lon };
+    lastRoadQueryTime = now;
+
+    const query = `[out:json][timeout:8];(way(around:70,${lat},${lon})["highway"]["maxspeed"];node(around:800,${lat},${lon})["highway"="speed_camera"];);out center tags;`;
+    try {
+      const res = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        body: 'data=' + encodeURIComponent(query)
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      let maxspeed = 0;
+      const cameras = [];
+      (data.elements || []).forEach((el) => {
+        if (el.type === 'node' && el.tags && el.tags.highway === 'speed_camera') {
+          cameras.push({ lat: el.lat, lon: el.lon });
+        } else if (el.type === 'way' && el.tags && el.tags.maxspeed && !maxspeed) {
+          maxspeed = parseOsmMaxspeed(el.tags.maxspeed);
+        }
+      });
+      const entry = { maxspeed, cameras, ts: now };
+      cache[key] = entry;
+      const keys = Object.keys(cache);
+      if (keys.length > 80) delete cache[keys[0]];
+      try { localStorage.setItem(STORAGE_ROAD_CACHE, JSON.stringify(cache)); } catch (_) {}
+      applyRoadInfo(entry, lat, lon);
+    } catch (_) {}
+  }
+
+  function updateSpeedAndRadarUI(spdKmh) {
+    const activeLimit = state.speedLimit > 0 ? state.speedLimit : state.roadSpeedLimit;
+    const wrap = $('speedLimitWrap');
+    const sign = $('speedLimitSign');
+    const radar = $('radarBadge');
+    if (!wrap || !sign || !radar) return;
+
+    const showWrap = activeLimit > 0 || state.nearestRadarDist != null;
+    wrap.style.display = showWrap ? 'flex' : 'none';
+
+    if (activeLimit > 0) {
+      sign.style.display = 'grid';
+      sign.textContent = String(activeLimit);
+      const isOver = spdKmh > activeLimit;
+      sign.classList.toggle('overspeed', isOver);
+      $('hudCard').classList.toggle('speed-alert', isOver);
+      if (isOver && Date.now() - state.lastSpeedBeep > 6000) {
+        state.lastSpeedBeep = Date.now();
+        beepAlert();
+      }
+    } else {
+      sign.style.display = 'none';
+      sign.classList.remove('overspeed');
+      $('hudCard').classList.remove('speed-alert');
+    }
+
+    if (state.nearestRadarDist != null) {
+      radar.style.display = 'inline-block';
+      radar.textContent = `📷 Radar ${Math.round(state.nearestRadarDist)} m`;
+      if (Date.now() - state.lastRadarBeep > 20000) {
+        state.lastRadarBeep = Date.now();
+        beepAlert();
+      }
+    } else {
+      radar.style.display = 'none';
+    }
   }
 
   function speakPT(text) {
@@ -388,16 +563,10 @@
       }
     }
 
-    // Speed limit alert
-    if (state.speedLimit > 0 && spdKmh > state.speedLimit) {
-      $('hudCard').classList.add('speed-alert');
-      if (now - state.lastSpeedBeep > 5000) {
-        state.lastSpeedBeep = now;
-        beepAlert();
-      }
-    } else {
-      $('hudCard').classList.remove('speed-alert');
-    }
+    // Speed limit & radar alert (road maxspeed + manual speedLimit)
+    fetchRoadLimitsAndRadars(lat, lon);
+    updateSpeedAndRadarUI(spdKmh);
+    if (state.autoNightMode && !state.manualTheme) applyNightMode();
 
     // Track recording
     if (state.rec.active && !state.rec.paused) {
@@ -780,15 +949,28 @@
     }).join('');
   }
 
+  function calcTripSummary(distMeters, durationSec) {
+    const km = (distMeters || 0) / 1000;
+    const avgKmh = durationSec > 0 ? km / (durationSec / 3600) : 0;
+    const fuelL = km * ((state.fuelConsumption || 6.0) / 100);
+    return { km, avgKmh, fuelL };
+  }
+
   function handleDestinationArrival(target) {
     const destName = target.name || 'Destino';
+    const recDist = state.rec.active ? state.rec.distMeters : state.trip.odoMeters;
+    const recDur = state.rec.active ? state.rec.elapsedSec : state.trip.movingSec;
+    const summary = calcTripSummary(recDist, recDur);
     speakPT(`Chegou ao seu destino: ${destName}`);
     cancelNavigation();
     if (state.rec.active) {
       stopAndSaveRec({ auto: true, autoName: destName });
-      showArrivalBanner(`✅ Chegou ao destino (${destName}) — Percurso gravado automaticamente`);
+      showArrivalBanner(
+        `✅ Chegou a ${destName} — Gravado · ${formatDistance(recDist)} · Méd: ${summary.avgKmh.toFixed(0)} km/h · ⛽ ${summary.fuelL.toFixed(2)} L`,
+        8000
+      );
     } else {
-      showArrivalBanner(`🏁 Chegou ao destino: ${destName}`);
+      showArrivalBanner(`🏁 Chegou ao destino: ${destName} (${formatDistance(recDist)} · ⛽ ${summary.fuelL.toFixed(2)} L)`, 7000);
     }
   }
 
@@ -996,13 +1178,14 @@
     list.innerHTML = '';
     state.tracks.forEach((t) => {
       const when = t.date ? new Date(t.date).toLocaleString('pt-PT', { dateStyle: 'short', timeStyle: 'short' }) : '';
+      const sum = calcTripSummary(t.distMeters, t.durationSec);
       const div = document.createElement('div');
       div.className = 'list-card';
       div.innerHTML = `
         <div class="list-card-top">
           <div>
             <div class="list-card-title">🥾 ${escapeHtml(t.name)}</div>
-            <div class="list-card-sub">${when ? escapeHtml(when) + ' · ' : ''}${formatDistance(t.distMeters)} · ${formatDuration(t.durationSec)} · +${Math.round(t.gainMeters || 0)}m · ${t.points.length} pts</div>
+            <div class="list-card-sub">${when ? escapeHtml(when) + ' · ' : ''}${formatDistance(t.distMeters)} · ${formatDuration(t.durationSec)} · ${sum.avgKmh.toFixed(1)} km/h · ⛽ ${sum.fuelL.toFixed(2)} L · +${Math.round(t.gainMeters || 0)}m</div>
           </div>
         </div>
         <div class="chip-row">
@@ -1301,8 +1484,11 @@
   });
 
   $('btnTheme').addEventListener('click', () => {
-    document.body.classList.toggle('theme-day');
+    const currentlyNight = document.body.classList.contains('night-drive') || !document.body.classList.contains('theme-day');
+    state.manualTheme = currentlyNight ? 'day' : 'night';
+    applyNightMode();
     saveCfg();
+    showToast(state.manualTheme === 'night' ? '🌙 Modo Noturno ativo' : '☀️ Modo Dia ativo');
   });
 
   $('btnFullscreen').addEventListener('click', () => {
@@ -1503,22 +1689,181 @@
     $('measurePill').classList.remove('visible');
   });
 
-  $('btnShareLoc').addEventListener('click', async () => {
-    if (state.lat == null) return showToast('A aguardar GPS...');
-    const url = `https://www.openstreetmap.org/?mlat=${state.lat.toFixed(6)}&mlon=${state.lon.toFixed(6)}#map=16/${state.lat.toFixed(6)}/${state.lon.toFixed(6)}`;
-    const text = `Minha posição GPS: ${state.lat.toFixed(6)}, ${state.lon.toFixed(6)} (Alt: ${state.alt != null ? Math.round(state.alt) + 'm' : '--'})\n${url}`;
-    if (navigator.share) {
-      try { await navigator.share({ title: 'Localização GPS', text, url }); } catch (_) {}
-    } else {
-      await navigator.clipboard.writeText(text);
-      showToast('Link e coordenadas copiados!');
+  async function shareCurrentLocation() {
+    if (state.lat == null) return showToast('A aguardar sinal GPS...');
+    const latStr = state.lat.toFixed(6);
+    const lonStr = state.lon.toFixed(6);
+    const mapsUrl = `https://maps.google.com/?q=${latStr},${lonStr}`;
+    let approxAddress = 'Localização aproximada indisponível';
+
+    if (navigator.onLine !== false) {
+      try {
+        const ctrl = new AbortController();
+        const tid = setTimeout(() => ctrl.abort(), 2200);
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latStr}&lon=${lonStr}&zoom=17&addressdetails=1`,
+          { signal: ctrl.signal }
+        );
+        clearTimeout(tid);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.display_name) {
+            approxAddress = data.display_name.split(',').slice(0, 3).map((s) => s.trim()).join(', ');
+          }
+        }
+      } catch (_) {}
     }
-  });
+
+    const text = `📍 Estou aqui:\nMorada aprox.: ${approxAddress}\nCoordenadas: ${latStr}, ${lonStr}\nAbrir no mapa: ${mapsUrl}`;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: 'Onde Estou — GPS Terrestre', text, url: mapsUrl });
+        return;
+      } catch (_) {}
+    }
+    const waUrl = `https://wa.me/?text=${encodeURIComponent(text)}`;
+    window.open(waUrl, '_blank', 'noopener');
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('📍 Mensagem copiada e pronta a enviar!');
+    } catch (_) {}
+  }
+
+  $('btnShareLoc').addEventListener('click', shareCurrentLocation);
+  if ($('btnQuickShareMap')) $('btnQuickShareMap').addEventListener('click', shareCurrentLocation);
+
+  // --- Locais Favoritos (1 Toque) ---
+  function renderFavoritesBar() {
+    const list = $('favChipsList');
+    if (!list) return;
+    list.innerHTML = '';
+    state.favorites.forEach((f) => {
+      const btn = document.createElement('button');
+      btn.className = 'fav-chip';
+      btn.innerHTML = `${escapeHtml(f.icon || '⭐')} <span>${escapeHtml(f.name)}</span>`;
+      btn.addEventListener('click', () => routeTo(f.lat, f.lon, f.name));
+      list.appendChild(btn);
+    });
+  }
+
+  function renderFavoritesManageList() {
+    const list = $('favManageList');
+    if (!list) return;
+    if (!state.favorites.length) {
+      list.innerHTML = '<div class="list-card-sub">Ainda não tem favoritos guardados.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    state.favorites.forEach((f) => {
+      const div = document.createElement('div');
+      div.className = 'list-card';
+      div.innerHTML = `
+        <div class="list-card-top">
+          <div>
+            <div class="list-card-title">${escapeHtml(f.icon || '⭐')} ${escapeHtml(f.name)}</div>
+            <div class="list-card-sub">${f.lat.toFixed(5)}, ${f.lon.toFixed(5)}</div>
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-sm btn-primary" data-act="go">Ir</button>
+            <button class="btn btn-sm btn-danger" data-act="del">🗑️</button>
+          </div>
+        </div>
+      `;
+      div.querySelector('[data-act="go"]').onclick = () => routeTo(f.lat, f.lon, f.name);
+      div.querySelector('[data-act="del"]').onclick = () => {
+        state.favorites = state.favorites.filter((x) => x.id !== f.id);
+        saveFavorites();
+        renderFavoritesBar();
+        renderFavoritesManageList();
+      };
+      list.appendChild(div);
+    });
+  }
+
+  if ($('btnOpenAddFav')) {
+    $('btnOpenAddFav').addEventListener('click', () => {
+      $('favNameInput').value = 'Casa';
+      renderFavoritesManageList();
+      openSheet('sheetAddFav');
+    });
+  }
+
+  if ($('favSourceChips')) {
+    $('favSourceChips').querySelectorAll('.chip').forEach((c) => {
+      c.addEventListener('click', () => {
+        $('favSourceChips').querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
+        c.classList.add('active');
+      });
+    });
+  }
+
+  if ($('favIconChips')) {
+    $('favIconChips').querySelectorAll('.chip').forEach((c) => {
+      c.addEventListener('click', () => {
+        $('favIconChips').querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
+        c.classList.add('active');
+        if (c.dataset.label) $('favNameInput').value = c.dataset.label;
+      });
+    });
+  }
+
+  if ($('btnSaveFav')) {
+    $('btnSaveFav').addEventListener('click', () => {
+      const srcChip = $('favSourceChips').querySelector('.chip.active');
+      const src = srcChip ? srcChip.dataset.src : 'gps';
+      let lat, lon;
+      if (src === 'dest' && state.nav.target) {
+        lat = state.nav.target.lat;
+        lon = state.nav.target.lon;
+      } else if (state.lat != null) {
+        lat = state.lat;
+        lon = state.lon;
+      } else {
+        const c = map.getCenter();
+        lat = c.lat;
+        lon = c.lng;
+      }
+      const iconChip = $('favIconChips').querySelector('.chip.active');
+      const icon = iconChip ? iconChip.dataset.icon : '⭐';
+      const name = $('favNameInput').value.trim() || (iconChip && iconChip.dataset.label) || 'Favorito';
+      state.favorites.unshift({ id: Date.now(), icon, name, lat, lon });
+      saveFavorites();
+      renderFavoritesBar();
+      renderFavoritesManageList();
+      showToast(`⭐ Favorito "${name}" guardado!`);
+    });
+  }
 
   $('cfgSpeedLimit').addEventListener('change', (e) => {
     state.speedLimit = Math.max(0, Number(e.target.value) || 0);
     saveCfg();
+    updateSpeedAndRadarUI(state.speedKmh);
   });
+
+  if ($('cfgMuteSpeedAlert')) {
+    $('cfgMuteSpeedAlert').addEventListener('change', (e) => {
+      state.muteSpeedAlert = Boolean(e.target.checked);
+      saveCfg();
+      showToast(state.muteSpeedAlert ? '🔇 Aviso sonoro silenciado' : '🔊 Aviso sonoro ativado');
+    });
+  }
+
+  if ($('cfgAutoNight')) {
+    $('cfgAutoNight').addEventListener('change', (e) => {
+      state.autoNightMode = Boolean(e.target.checked);
+      if (state.autoNightMode) state.manualTheme = null;
+      saveCfg();
+      applyNightMode();
+    });
+  }
+
+  if ($('cfgFuelConsumption')) {
+    $('cfgFuelConsumption').addEventListener('change', (e) => {
+      state.fuelConsumption = Math.max(0.5, Number(e.target.value) || 6.0);
+      saveCfg();
+      renderTracksList();
+    });
+  }
 
   $('cfgCoordFmt').addEventListener('change', (e) => {
     state.coordFmt = e.target.value;
@@ -1638,6 +1983,7 @@
 
   // Boot
   loadStorage();
+  renderFavoritesBar();
   renderWaypointsMap();
   renderWaypointsList();
   renderTracksList();

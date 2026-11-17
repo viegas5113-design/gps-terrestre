@@ -133,7 +133,19 @@
       <div id="arrivalBanner" class="arrival-banner" role="status" aria-live="polite">
         <span id="arrivalBannerText">✅ Chegou ao destino — Percurso gravado automaticamente</span>
       </div>
+
+      <!-- BARRA RÁPIDA DE LOCAIS FAVORITOS -->
+      <div id="favBar" class="fav-bar">
+        <button id="btnOpenAddFav" class="fav-chip fav-add" title="Guardar Local Favorito">+ Favorito</button>
+        <div id="favChipsList" class="fav-chips-list"></div>
+      </div>
     </section>
+
+    <!-- SINAL DE LIMITE DE VELOCIDADE & RADAR -->
+    <div id="speedLimitWrap" class="speed-sign-wrap" style="display:none;">
+      <div id="speedLimitSign" class="speed-sign" title="Limite de velocidade da via">--</div>
+      <div id="radarBadge" class="radar-badge" style="display:none;">📷 Radar</div>
+    </div>
 
     <!-- BOTÕES FLUTUANTES NO MAPA -->
     <div class="map-fab-col">
@@ -143,6 +155,7 @@
       <button id="btnParkCar" class="fab-btn" title="Marcar / Voltar ao Carro">🚗</button>
     </div>
 
+    <button id="btnQuickShareMap" class="share-quick-pill" title="Enviar a minha localização por WhatsApp ou SMS">📍 Enviar Onde Estou</button>
     <button id="btnClearCarMap" class="car-clear-pill" style="display:none;" title="Apagar marcador do carro estacionado">❌ Tirar Carro</button>
     <button id="btnClearRouteMap" class="route-clear-pill" style="display:none;" title="Limpar rota e pré-visualização do mapa">❌ Desligar Caminho</button>
 
@@ -335,7 +348,17 @@
             <span style="font-size:13px;font-weight:600;">⏺️ Gravação Automática de Percursos</span>
             <input id="cfgAutoRecord" class="toggle-switch" type="checkbox" checked>
           </label>
-          <label style="font-size:12px;color:var(--muted);margin-top:4px;">Alerta de Limite de Velocidade (km/h, 0 = desligado)</label>
+          <label class="toggle-row-inline" for="cfgMuteSpeedAlert" style="margin-top:6px;">
+            <span style="font-size:13px;font-weight:600;">🔇 Silenciar aviso sonoro de velocidade/radares</span>
+            <input id="cfgMuteSpeedAlert" class="toggle-switch" type="checkbox">
+          </label>
+          <label class="toggle-row-inline" for="cfgAutoNight" style="margin-top:6px;">
+            <span style="font-size:13px;font-weight:600;">🌙 Modo Noturno Automático (pôr do sol)</span>
+            <input id="cfgAutoNight" class="toggle-switch" type="checkbox" checked>
+          </label>
+          <label style="font-size:12px;color:var(--muted);margin-top:6px;">Consumo Médio do Carro (L/100 km)</label>
+          <input id="cfgFuelConsumption" class="input" type="number" step="0.1" min="0.5" max="50" value="6.0">
+          <label style="font-size:12px;color:var(--muted);margin-top:4px;">Alerta de Limite de Velocidade Manual (km/h, 0 = automático da via)</label>
           <input id="cfgSpeedLimit" class="input" type="number" min="0" max="250" value="0">
           <label style="font-size:12px;color:var(--muted);margin-top:4px;">Formato de Coordenadas</label>
           <select id="cfgCoordFmt" class="input">
@@ -346,6 +369,33 @@
           </select>
           <button id="btnCopyCoordsNow" class="btn" style="margin-top:6px;">📋 Copiar Coordenadas Atuais</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: GUARDAR FAVORITO RÁPIDO -->
+  <div id="sheetAddFav" class="sheet-backdrop">
+    <div class="sheet">
+      <div class="sheet-header">
+        <h3>⭐ Locais Favoritos (1 Toque)</h3>
+        <button class="sheet-close" data-close>✕</button>
+      </div>
+      <div class="sheet-body">
+        <div class="chip-row" id="favSourceChips">
+          <button class="chip active" data-src="gps">📍 Local Atual (GPS)</button>
+          <button class="chip" data-src="dest">🏁 Destino Atual</button>
+        </div>
+        <div class="chip-row" id="favIconChips">
+          <button class="chip active" data-icon="🏠" data-label="Casa">🏠 Casa</button>
+          <button class="chip" data-icon="⚓" data-label="Marina">⚓ Marina</button>
+          <button class="chip" data-icon="🔧" data-label="Oficina">🔧 Oficina</button>
+          <button class="chip" data-icon="🛒" data-label="Supermercado">🛒 Supermercado</button>
+          <button class="chip" data-icon="💼" data-label="Trabalho">💼 Trabalho</button>
+          <button class="chip" data-icon="⭐" data-label="">⭐ Outro</button>
+        </div>
+        <input id="favNameInput" class="input" placeholder="Nome do favorito (ex: Casa, Marina...)">
+        <button id="btnSaveFav" class="btn btn-primary" style="width:100%;">💾 Guardar Favorito</button>
+        <div id="favManageList" style="display:flex;flex-direction:column;gap:8px;margin-top:6px;"></div>
       </div>
     </div>
   </div>
