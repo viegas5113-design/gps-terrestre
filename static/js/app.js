@@ -48,6 +48,7 @@
     fuelConsumption: 6.0,
     layerIdx: 0,
     wakeLock: null,
+    keepScreenOn: false,
 
     // Trip computer
     trip: {
@@ -162,6 +163,36 @@
       );
       btnClearRoute.style.display = hasPath ? 'inline-flex' : 'none';
     }
+    syncWakeLock();
+  }
+
+  function updateWakeLockUI() {
+    const active = Boolean(state.wakeLock || state.keepScreenOn);
+    if ($('btnWakeLock')) $('btnWakeLock').classList.toggle('active', active);
+    if ($('cfgWakeLock')) $('cfgWakeLock').checked = Boolean(state.keepScreenOn);
+  }
+
+  async function syncWakeLock() {
+    const shouldKeepOn = !document.hidden && (state.keepScreenOn || state.nav.active || state.rec.active);
+    if (!('wakeLock' in navigator)) {
+      updateWakeLockUI();
+      return;
+    }
+    if (shouldKeepOn && !state.wakeLock) {
+      try {
+        state.wakeLock = await navigator.wakeLock.request('screen');
+        state.wakeLock.addEventListener('release', () => {
+          state.wakeLock = null;
+          updateWakeLockUI();
+        });
+      } catch (_) {}
+    } else if (!shouldKeepOn && state.wakeLock) {
+      try {
+        await state.wakeLock.release();
+      } catch (_) {}
+      state.wakeLock = null;
+    }
+    updateWakeLockUI();
   }
 
   function applyNightMode() {
@@ -205,6 +236,7 @@
       if (cfg.autoNightMode != null) state.autoNightMode = Boolean(cfg.autoNightMode);
       if (cfg.manualTheme) state.manualTheme = cfg.manualTheme;
       if (cfg.fuelConsumption != null) state.fuelConsumption = Math.max(0.5, Number(cfg.fuelConsumption) || 6.0);
+      if (cfg.keepScreenOn != null) state.keepScreenOn = Boolean(cfg.keepScreenOn);
     } catch (e) {
       console.warn('Erro ao ler localStorage', e);
     }
@@ -212,10 +244,12 @@
     $('cfgSpeedLimit').value = state.speedLimit;
     if ($('cfgMuteSpeedAlert')) $('cfgMuteSpeedAlert').checked = !!state.muteSpeedAlert;
     if ($('cfgAutoNight')) $('cfgAutoNight').checked = !!state.autoNightMode;
+    if ($('cfgWakeLock')) $('cfgWakeLock').checked = !!state.keepScreenOn;
     if ($('cfgFuelConsumption')) $('cfgFuelConsumption').value = state.fuelConsumption.toFixed(1);
     $('hudCoordFmt').textContent = state.coordFmt;
     syncAutoRecordUI();
     applyNightMode();
+    syncWakeLock();
   }
 
   function saveWaypoints() {
@@ -241,6 +275,7 @@
         autoNightMode: state.autoNightMode,
         manualTheme: state.manualTheme,
         fuelConsumption: state.fuelConsumption,
+        keepScreenOn: state.keepScreenOn,
         theme: document.body.classList.contains('theme-day') ? 'day' : 'night'
       })
     );
@@ -1462,20 +1497,24 @@
     showToast(state.voiceOn ? 'Voz de navegação ligada' : 'Voz desligada');
   });
 
-  $('btnWakeLock').addEventListener('click', async () => {
-    if (!('wakeLock' in navigator)) return showToast('Wake Lock não suportado.');
-    if (state.wakeLock) {
-      await state.wakeLock.release();
-      state.wakeLock = null;
-      $('btnWakeLock').classList.remove('active');
-      showToast('Ecrã pode apagar normalmente');
-    } else {
-      try {
-        state.wakeLock = await navigator.wakeLock.request('screen');
-        $('btnWakeLock').classList.add('active');
-        showToast('💡 Ecrã mantido sempre ligado');
-      } catch (_) {}
+  const toggleKeepScreenOn = (enabled) => {
+    if (!('wakeLock' in navigator)) {
+      state.keepScreenOn = false;
+      updateWakeLockUI();
+      return showToast('Wake Lock não suportado neste browser.');
     }
+    state.keepScreenOn = Boolean(enabled);
+    saveCfg();
+    syncWakeLock();
+    showToast(state.keepScreenOn ? '💡 Ecrã mantido sempre ligado' : '💡 Ecrã automático (ligado apenas em rota/gravação)');
+  };
+
+  $('btnWakeLock').addEventListener('click', () => toggleKeepScreenOn(!state.keepScreenOn));
+  if ($('cfgWakeLock')) {
+    $('cfgWakeLock').addEventListener('change', (e) => toggleKeepScreenOn(e.target.checked));
+  }
+  document.addEventListener('visibilitychange', () => {
+    syncWakeLock();
   });
 
   $('btnMirror').addEventListener('click', () => {
