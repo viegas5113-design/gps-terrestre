@@ -23,6 +23,7 @@
   const STORAGE_CAR = 'gps_terrestre_car_v1';
   const STORAGE_FAVS = 'gps_terrestre_favs_v1';
   const STORAGE_ROAD_CACHE = 'gps_terrestre_road_cache_v1';
+  const STORAGE_HAZARDS = 'gps_terrestre_hazards_v1';
 
   const state = {
     lat: null,
@@ -39,7 +40,7 @@
     coordFmt: 'DD',
     speedLimit: 0,
     roadSpeedLimit: 0,
-    nearestRadarDist: null,
+    nearestHazard: null,
     muteSpeedAlert: false,
     lastSpeedBeep: 0,
     lastRadarBeep: 0,
@@ -100,6 +101,7 @@
     waypoints: [],
     tracks: [],
     favorites: [],
+    hazards: [],
     carPos: null,
     autoRecord: true
   };
@@ -227,6 +229,7 @@
       state.waypoints = JSON.parse(localStorage.getItem(STORAGE_WPTS) || '[]');
       state.tracks = JSON.parse(localStorage.getItem(STORAGE_TRACKS) || '[]');
       state.favorites = JSON.parse(localStorage.getItem(STORAGE_FAVS) || '[]');
+      state.hazards = JSON.parse(localStorage.getItem(STORAGE_HAZARDS) || '[]').filter((h) => !h.expiresAt || h.expiresAt > Date.now());
       state.carPos = JSON.parse(localStorage.getItem(STORAGE_CAR) || 'null');
       const cfg = JSON.parse(localStorage.getItem(STORAGE_CFG) || '{}');
       if (cfg.coordFmt) state.coordFmt = cfg.coordFmt;
@@ -262,6 +265,10 @@
 
   function saveFavorites() {
     localStorage.setItem(STORAGE_FAVS, JSON.stringify(state.favorites));
+  }
+
+  function saveHazards() {
+    localStorage.setItem(STORAGE_HAZARDS, JSON.stringify(state.hazards));
   }
 
   function saveCfg() {
@@ -329,6 +336,7 @@
   const routePolyline = L.polyline([], { color: '#10b981', weight: 5, opacity: 0.9 }).addTo(map);
   const directLine = L.polyline([], { color: '#38bdf8', weight: 3, dashArray: '8,8' }).addTo(map);
   const importedTrackLayer = L.polyline([], { color: '#f59e0b', weight: 4, opacity: 0.9 }).addTo(map);
+  const userHazardsLayer = L.layerGroup().addTo(map);
   let destMarker = null;
   const measureLine = L.polyline([], { color: '#f59e0b', weight: 3, dashArray: '6,6' }).addTo(map);
   const measureMarkers = L.layerGroup().addTo(map);
@@ -423,23 +431,80 @@
     return m ? parseInt(m[1], 10) : 0;
   }
 
+  function pruneExpiredHazards() {
+    const now = Date.now();
+    const before = state.hazards.length;
+    state.hazards = state.hazards.filter((h) => !h.expiresAt || h.expiresAt > now);
+    if (state.hazards.length !== before) {
+      saveHazards();
+      renderUserHazardsMap();
+    }
+  }
+
+  function renderUserHazardsMap() {
+    userHazardsLayer.clearLayers();
+    state.hazards.forEach((h) => {
+      const m = L.marker([h.lat, h.lon], {
+        icon: L.divIcon({
+          className: 'hazard-pin',
+          iconSize: [30, 30],
+          iconAnchor: [15, 15],
+          html: '<div style="font-size:22px;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.7));">🚔</div>'
+        })
+      });
+      const expStr = h.expiresAt ? new Date(h.expiresAt).toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' }) : '--';
+      m.bindPopup(`
+        <strong>🚔 ${escapeHtml(h.label || 'Controlo / Perigo')}</strong><br>
+        <small>Expira às ${expStr}</small><br>
+        <button onclick="window._gpsApp.removeHazard(${h.id})" style="margin-top:6px;padding:5px 10px;border:none;border-radius:6px;background:#ef4444;color:#fff;font-weight:700;cursor:pointer;">🗑️ Remover</button>
+      `);
+      userHazardsLayer.addLayer(m);
+    });
+  }
+
+  function removeHazard(id) {
+    state.hazards = state.hazards.filter((h) => h.id !== id);
+    saveHazards();
+    renderUserHazardsMap();
+    updateSpeedAndRadarUI(state.speedKmh);
+    showToast('Alerta removido do mapa.');
+  }
+
   function applyRoadInfo(info, lat, lon) {
     state.roadSpeedLimit = info.maxspeed || 0;
-    let nearest = null;
-    if (Array.isArray(info.cameras)) {
-      info.cameras.forEach((c) => {
-        const d = haversineMeters(lat, lon, c.lat, c.lon);
-        if (d <= 600 && (nearest == null || d < nearest)) nearest = d;
-      });
-    }
-    state.nearestRadarDist = nearest;
+    updateNearestHazard(info, lat, lon);
     updateSpeedAndRadarUI(state.speedKmh);
   }
+
+  function updateNearestHazard(info, lat, lon) {
+    if (lat == null || lon == null) {
+      state.nearestHazard = null;
+      return;
+    }
+    pruneExpiredHazards();
+    let best = null;
+    const consider = (itemLat, itemLon, kind, label) => {
+      const d = haversineMeters(lat, lon, itemLat, itemLon);
+      if (d <= 500 && (!best || d < best.dist)) {
+        best = { dist: d, kind, label };
+      }
+    };
+    if (info && Array.isArray(info.cameras)) {
+      info.cameras.forEach((c) => consider(c.lat, c.lon, c.kind || 'radar', c.label || ''));
+    }
+    state.hazards.forEach((h) => consider(h.lat, h.lon, 'user', h.label || 'Controlo / Perigo'));
+    state.nearestHazard = best;
+  }
+
+  let lastRoadInfo = null;
 
   async function fetchRoadLimitsAndRadars(lat, lon) {
     const now = Date.now();
     const moved = lastRoadQueryPos ? haversineMeters(lastRoadQueryPos.lat, lastRoadQueryPos.lon, lat, lon) : 9999;
-    if (moved < 220 && now - lastRoadQueryTime < 25000) return;
+    if (moved < 220 && now - lastRoadQueryTime < 25000) {
+      updateNearestHazard(lastRoadInfo, lat, lon);
+      return;
+    }
 
     const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
     const cache = getRoadCache();
@@ -447,15 +512,19 @@
     if (cached && now - cached.ts < 86400000) {
       lastRoadQueryPos = { lat, lon };
       lastRoadQueryTime = now;
+      lastRoadInfo = cached;
       applyRoadInfo(cached, lat, lon);
       return;
     }
 
-    if (navigator.onLine === false) return;
+    if (navigator.onLine === false) {
+      updateNearestHazard(lastRoadInfo, lat, lon);
+      return;
+    }
     lastRoadQueryPos = { lat, lon };
     lastRoadQueryTime = now;
 
-    const query = `[out:json][timeout:8];(way(around:70,${lat},${lon})["highway"]["maxspeed"];node(around:800,${lat},${lon})["highway"="speed_camera"];);out center tags;`;
+    const query = `[out:json][timeout:8];(way(around:70,${lat},${lon})["highway"]["maxspeed"];node(around:800,${lat},${lon})["highway"="speed_camera"];node(around:800,${lat},${lon})["man_made"="surveillance"]["surveillance:type"="camera"];nwr(around:800,${lat},${lon})["amenity"="police"];);out center tags;`;
     try {
       const res = await fetch('https://overpass-api.de/api/interpreter', {
         method: 'POST',
@@ -466,19 +535,29 @@
       let maxspeed = 0;
       const cameras = [];
       (data.elements || []).forEach((el) => {
-        if (el.type === 'node' && el.tags && el.tags.highway === 'speed_camera') {
-          cameras.push({ lat: el.lat, lon: el.lon });
-        } else if (el.type === 'way' && el.tags && el.tags.maxspeed && !maxspeed) {
-          maxspeed = parseOsmMaxspeed(el.tags.maxspeed);
+        const tags = el.tags || {};
+        const elLat = el.lat != null ? el.lat : el.center && el.center.lat;
+        const elLon = el.lon != null ? el.lon : el.center && el.center.lon;
+        if (tags.highway === 'speed_camera' && elLat != null) {
+          cameras.push({ lat: elLat, lon: elLon, kind: 'radar', label: 'Radar / Controlo' });
+        } else if (tags.man_made === 'surveillance' && tags['surveillance:type'] === 'camera' && elLat != null) {
+          cameras.push({ lat: elLat, lon: elLon, kind: 'camera', label: 'Câmara de Trânsito' });
+        } else if (tags.amenity === 'police' && elLat != null) {
+          cameras.push({ lat: elLat, lon: elLon, kind: 'police', label: tags.name || 'Posto GNR / PSP' });
+        } else if (el.type === 'way' && tags.maxspeed && !maxspeed) {
+          maxspeed = parseOsmMaxspeed(tags.maxspeed);
         }
       });
       const entry = { maxspeed, cameras, ts: now };
+      lastRoadInfo = entry;
       cache[key] = entry;
       const keys = Object.keys(cache);
       if (keys.length > 80) delete cache[keys[0]];
       try { localStorage.setItem(STORAGE_ROAD_CACHE, JSON.stringify(cache)); } catch (_) {}
       applyRoadInfo(entry, lat, lon);
-    } catch (_) {}
+    } catch (_) {
+      updateNearestHazard(lastRoadInfo, lat, lon);
+    }
   }
 
   function updateSpeedAndRadarUI(spdKmh) {
@@ -488,7 +567,7 @@
     const radar = $('radarBadge');
     if (!wrap || !sign || !radar) return;
 
-    const showWrap = activeLimit > 0 || state.nearestRadarDist != null;
+    const showWrap = activeLimit > 0 || state.nearestHazard != null;
     wrap.style.display = showWrap ? 'flex' : 'none';
 
     if (activeLimit > 0) {
@@ -507,9 +586,15 @@
       $('hudCard').classList.remove('speed-alert');
     }
 
-    if (state.nearestRadarDist != null) {
+    if (state.nearestHazard != null) {
+      const h = state.nearestHazard;
+      const d = Math.round(h.dist);
+      let msg = `📷 Radar / Controlo a ${d} m`;
+      if (h.kind === 'camera') msg = `📹 Câmara de Trânsito a ${d} m`;
+      else if (h.kind === 'police') msg = `🚔 ${h.label || 'Posto GNR / PSP'} a ${d} m`;
+      else if (h.kind === 'user') msg = `🚔 Controlo / Perigo a ${d} m`;
       radar.style.display = 'inline-block';
-      radar.textContent = `📷 Radar ${Math.round(state.nearestRadarDist)} m`;
+      radar.textContent = msg;
       if (Date.now() - state.lastRadarBeep > 20000) {
         state.lastRadarBeep = Date.now();
         beepAlert();
@@ -1770,6 +1855,23 @@
 
   $('btnShareLoc').addEventListener('click', shareCurrentLocation);
   if ($('btnQuickShareMap')) $('btnQuickShareMap').addEventListener('click', shareCurrentLocation);
+  if ($('btnReportHazard')) {
+    $('btnReportHazard').addEventListener('click', () => {
+      if (state.lat == null) return showToast('A aguardar sinal GPS...');
+      const now = Date.now();
+      state.hazards.unshift({
+        id: now,
+        lat: state.lat,
+        lon: state.lon,
+        createdAt: now,
+        expiresAt: now + 4 * 3600 * 1000,
+        label: 'Controlo / Perigo'
+      });
+      saveHazards();
+      renderUserHazardsMap();
+      showToast('🚔 Controlo / Perigo assinalado no mapa (expira em 4h)');
+    });
+  }
 
   // --- Locais Favoritos (1 Toque) ---
   function renderFavoritesBar() {
@@ -2013,7 +2115,7 @@
   });
 
   // Expose popup callbacks
-  window._gpsApp = { routeTo, openSaveWpt, clearCar };
+  window._gpsApp = { routeTo, openSaveWpt, clearCar, removeHazard };
 
   // Service Worker Registration
   if ('serviceWorker' in navigator) {
@@ -2023,6 +2125,7 @@
   // Boot
   loadStorage();
   renderFavoritesBar();
+  renderUserHazardsMap();
   renderWaypointsMap();
   renderWaypointsList();
   renderTracksList();

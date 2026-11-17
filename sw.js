@@ -1,3 +1,4 @@
+// Cache v6 - Radares, Câmaras, Postos GNR/PSP & Controlo na Estrada
 const CACHE_SHELL = 'gps-terrestre-shell-v6';
 const CACHE_TILES = 'gps-terrestre-tiles-v1';
 

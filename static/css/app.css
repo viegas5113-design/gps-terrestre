@@ -638,8 +638,30 @@ html, body {
   backdrop-filter: blur(8px);
   cursor: pointer;
 }
-.share-quick-pill:active {
+.share-quick-pill:active,
+.hazard-quick-pill:active {
   transform: scale(0.97);
+}
+
+.hazard-quick-pill {
+  position: absolute;
+  right: 64px;
+  bottom: calc(188px + var(--safe-bottom));
+  z-index: 440;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.65);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
 }
 
 .search-result-card {
