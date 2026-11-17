@@ -471,10 +471,56 @@
     }
   });
 
-  // --- Search & Routing (Nominatim + OSRM) ---
+  // --- Search & Routing (Photon + Nominatim PT + OSRM) ---
+  let searchAbortController = null;
+  let searchDebounceTimer = null;
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function formatPhotonResult(f) {
+    const coords = f && f.geometry && f.geometry.coordinates;
+    if (!coords || coords.length < 2) return null;
+    const p = f.properties || {};
+    const streetFull = [p.street, p.housenumber].filter(Boolean).join(' ');
+    const title = p.name || streetFull || p.city || p.town || p.village || p.municipality || 'Local';
+    const subParts = [];
+    if (streetFull && streetFull !== title) subParts.push(streetFull);
+    if (p.postcode) subParts.push(p.postcode);
+    const locality = p.city || p.town || p.village || p.municipality;
+    if (locality && locality !== title) subParts.push(locality);
+    if (p.state && p.state !== locality) subParts.push(p.state);
+    if (p.country) subParts.push(p.country);
+    return {
+      title,
+      subtitle: subParts.join(', ') || p.osm_value || 'Portugal',
+      lat: parseFloat(coords[1]),
+      lon: parseFloat(coords[0])
+    };
+  }
+
+  function formatNominatimResult(item) {
+    const lat = parseFloat(item.lat);
+    const lon = parseFloat(item.lon);
+    if (Number.isNaN(lat) || Number.isNaN(lon)) return null;
+    const parts = (item.display_name || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const title = parts[0] || 'Local';
+    const subtitle = parts.slice(1).join(', ') || item.display_name || '';
+    return { title, subtitle, lat, lon };
+  }
+
   async function searchLocation(query) {
     const q = query.trim();
-    if (!q) return;
+    const box = $('searchResults');
+    if (!q) {
+      box.innerHTML = '';
+      return;
+    }
 
     // Direct lat,lon check
     const coordMatch = q.match(/^(-?\d+(?:\.\d+)?)\s*[,;\s]\s*(-?\d+(?:\.\d+)?)$/);
@@ -487,39 +533,94 @@
       }
     }
 
-    const box = $('searchResults');
-    box.innerHTML = '<div class="list-card-sub">A pesquisar...</div>';
+    if (navigator.onLine === false) {
+      box.innerHTML = '<div class="list-card"><div class="list-card-sub">📡 Sem ligação à internet. Ligue o Wi-Fi ou dados móveis para pesquisar moradas.</div></div>';
+      return;
+    }
+
+    if (searchAbortController) searchAbortController.abort();
+    searchAbortController = new AbortController();
+    const { signal } = searchAbortController;
+
+    box.innerHTML = '<div class="list-card-sub">🔍 A pesquisar moradas e locais...</div>';
+
+    const biasLat = state.lat != null ? state.lat : 37.10;
+    const biasLon = state.lon != null ? state.lon : -8.67;
+    const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&lat=${biasLat}&lon=${biasLon}&limit=6`;
+    const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=json&countrycodes=pt&addressdetails=1&limit=6&q=${encodeURIComponent(q)}`;
+
     try {
-      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=6&q=${encodeURIComponent(q)}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      if (!data.length) {
-        box.innerHTML = '<div class="list-card-sub">Sem resultados encontrados.</div>';
+      const [photonRes, nomRes] = await Promise.allSettled([
+        fetch(photonUrl, { signal }).then((r) => {
+          if (!r.ok) throw new Error('Photon HTTP ' + r.status);
+          return r.json();
+        }),
+        fetch(nominatimUrl, { signal }).then((r) => {
+          if (!r.ok) throw new Error('Nominatim HTTP ' + r.status);
+          return r.json();
+        })
+      ]);
+
+      if (signal.aborted) return;
+
+      const anySuccess = photonRes.status === 'fulfilled' || nomRes.status === 'fulfilled';
+      if (!anySuccess) {
+        box.innerHTML = '<div class="list-card"><div class="list-card-sub">📡 Sem ligação à internet ou serviço de pesquisa indisponível.</div></div>';
         return;
       }
+
+      const raw = [];
+      if (photonRes.status === 'fulfilled' && Array.isArray(photonRes.value?.features)) {
+        photonRes.value.features.forEach((f) => {
+          const item = formatPhotonResult(f);
+          if (item) raw.push(item);
+        });
+      }
+      if (nomRes.status === 'fulfilled' && Array.isArray(nomRes.value)) {
+        nomRes.value.forEach((n) => {
+          const item = formatNominatimResult(n);
+          if (item) raw.push(item);
+        });
+      }
+
+      // Deduplicate nearby results with matching or very close coordinates
+      const merged = [];
+      raw.forEach((item) => {
+        const isDup = merged.some((existing) => {
+          const d = haversineMeters(existing.lat, existing.lon, item.lat, item.lon);
+          return d < 60 || (d < 200 && existing.title.toLowerCase() === item.title.toLowerCase());
+        });
+        if (!isDup) merged.push(item);
+      });
+
+      const results = merged.slice(0, 8);
+      if (!results.length) {
+        box.innerHTML = `<div class="list-card"><div class="list-card-sub">Nenhum resultado encontrado para "${escapeHtml(q)}". Tente incluir a cidade ou verificar o nome.</div></div>`;
+        return;
+      }
+
       box.innerHTML = '';
-      data.forEach((item) => {
-        const lat = parseFloat(item.lat);
-        const lon = parseFloat(item.lon);
-        const dist = state.lat != null ? formatDistance(haversineMeters(state.lat, state.lon, lat, lon)) : '';
+      results.forEach((item) => {
+        const dist = state.lat != null ? formatDistance(haversineMeters(state.lat, state.lon, item.lat, item.lon)) : '';
         const div = document.createElement('div');
-        div.className = 'list-card';
+        div.className = 'list-card search-result-card';
         div.innerHTML = `
           <div class="list-card-top">
             <div>
-              <div class="list-card-title">${item.display_name.split(',')[0]}</div>
-              <div class="list-card-sub">${item.display_name} ${dist ? '· ' + dist : ''}</div>
+              <div class="list-card-title">${escapeHtml(item.title)}</div>
+              <div class="list-card-sub">${escapeHtml(item.subtitle)}${dist ? ' · ' + dist : ''}</div>
             </div>
             <button class="btn btn-sm btn-primary">Ir</button>
           </div>
         `;
-        div.querySelector('button').addEventListener('click', () => {
-          routeTo(lat, lon, item.display_name.split(',')[0]);
+        div.addEventListener('click', () => {
+          routeTo(item.lat, item.lon, item.title);
         });
         box.appendChild(div);
       });
     } catch (e) {
-      box.innerHTML = '<div class="list-card-sub">Erro na pesquisa (sem internet?).</div>';
+      if (e && e.name === 'AbortError') return;
+      box.innerHTML = '<div class="list-card"><div class="list-card-sub">📡 Erro na pesquisa (sem internet?).</div></div>';
     }
   }
 
@@ -830,15 +931,27 @@
       wptCluster.addLayer(m);
     });
 
-    if (carMarker) map.removeLayer(carMarker);
+    if (carMarker) {
+      map.removeLayer(carMarker);
+      carMarker = null;
+    }
     if (state.carPos) {
       carMarker = L.marker([state.carPos.lat, state.carPos.lon], {
         icon: L.divIcon({ className: 'car-pin', iconSize: [30, 30], iconAnchor: [15, 15], html: '<div style="font-size:22px;">🚗</div>' })
-      }).addTo(map).bindPopup('🚗 Carro Estacionado');
+      }).addTo(map).bindPopup(`
+        <strong>🚗 Carro Estacionado</strong><br>
+        <small>${state.carPos.lat.toFixed(5)}, ${state.carPos.lon.toFixed(5)}</small><br>
+        <div style="display:flex;gap:6px;margin-top:6px;">
+          <button onclick="window._gpsApp.routeTo(${state.carPos.lat},${state.carPos.lon},'Carro Estacionado')" style="padding:5px 10px;border:none;border-radius:6px;background:#10b981;color:#052e16;font-weight:700;cursor:pointer;">🧭 Ir</button>
+          <button onclick="window._gpsApp.clearCar()" style="padding:5px 10px;border:none;border-radius:6px;background:#ef4444;color:#fff;font-weight:700;cursor:pointer;">❌ Tirar Carro</button>
+        </div>
+      `);
       $('quickCarBox').style.display = 'block';
       $('quickCarSub').textContent = `${state.carPos.lat.toFixed(5)}, ${state.carPos.lon.toFixed(5)}`;
+      if ($('btnClearCarMap')) $('btnClearCarMap').style.display = 'inline-flex';
     } else {
       $('quickCarBox').style.display = 'none';
+      if ($('btnClearCarMap')) $('btnClearCarMap').style.display = 'none';
     }
   }
 
@@ -1088,6 +1201,13 @@
     if (state.lat != null) map.setView([state.lat, state.lon], Math.max(map.getZoom(), 16));
   });
 
+  function clearCar() {
+    state.carPos = null;
+    localStorage.removeItem(STORAGE_CAR);
+    renderWaypointsMap();
+    showToast('🚗 Marcador do carro removido!');
+  }
+
   $('btnParkCar').addEventListener('click', () => {
     if (state.carPos && confirm('Carro já marcado! Quer navegar até ao carro? (Cancelar para atualizar posição atual)')) {
       routeTo(state.carPos.lat, state.carPos.lon, 'Carro Estacionado');
@@ -1104,6 +1224,9 @@
     if (state.carPos) routeTo(state.carPos.lat, state.carPos.lon, 'Carro Estacionado');
   });
 
+  if ($('btnClearCar')) $('btnClearCar').addEventListener('click', clearCar);
+  if ($('btnClearCarMap')) $('btnClearCarMap').addEventListener('click', clearCar);
+
   $('btnCancelNav').addEventListener('click', cancelNavigation);
 
   $('routeModeChips').querySelectorAll('.chip').forEach((c) => {
@@ -1114,8 +1237,27 @@
     });
   });
 
-  $('btnSearchGo').addEventListener('click', () => searchLocation($('searchInput').value));
-  $('searchInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchLocation($('searchInput').value); });
+  $('btnSearchGo').addEventListener('click', () => {
+    clearTimeout(searchDebounceTimer);
+    searchLocation($('searchInput').value);
+  });
+  $('searchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      clearTimeout(searchDebounceTimer);
+      searchLocation($('searchInput').value);
+    }
+  });
+  $('searchInput').addEventListener('input', (e) => {
+    clearTimeout(searchDebounceTimer);
+    const val = e.target.value.trim();
+    if (!val) {
+      $('searchResults').innerHTML = '';
+      return;
+    }
+    if (val.length >= 3) {
+      searchDebounceTimer = setTimeout(() => searchLocation(val), 550);
+    }
+  });
 
   $('btnStartRecSheet').addEventListener('click', startRecording);
   $('btnRecPause').addEventListener('click', togglePauseRec);
@@ -1319,7 +1461,7 @@
   });
 
   // Expose popup callbacks
-  window._gpsApp = { routeTo, openSaveWpt };
+  window._gpsApp = { routeTo, openSaveWpt, clearCar };
 
   // Service Worker Registration
   if ('serviceWorker' in navigator) {

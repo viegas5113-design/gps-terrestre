@@ -414,6 +414,41 @@ html, body {
   display: flex;
 }
 
+/* Parked Car Clear Pill */
+.car-clear-pill {
+  position: absolute;
+  right: 64px;
+  bottom: calc(84px + var(--safe-bottom));
+  z-index: 440;
+  display: none;
+  align-items: center;
+  gap: 6px;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(239, 68, 68, 0.7);
+  background: rgba(127, 29, 29, 0.92);
+  color: #fee2e2;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+}
+
+.car-clear-pill:active {
+  transform: scale(0.97);
+}
+
+.search-result-card {
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.search-result-card:hover {
+  border-color: var(--accent);
+}
+
 /* Bottom Mobile Dock */
 .bottom-dock {
   position: absolute;

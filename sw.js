@@ -1,4 +1,4 @@
-const CACHE_SHELL = 'gps-terrestre-shell-v1';
+const CACHE_SHELL = 'gps-terrestre-shell-v2';
 const CACHE_TILES = 'gps-terrestre-tiles-v1';
 
 const SHELL_FILES = [

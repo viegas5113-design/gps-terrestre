@@ -137,6 +137,8 @@
       <button id="btnParkCar" class="fab-btn" title="Marcar / Voltar ao Carro">🚗</button>
     </div>
 
+    <button id="btnClearCarMap" class="car-clear-pill" style="display:none;" title="Apagar marcador do carro estacionado">❌ Tirar Carro</button>
+
     <!-- PILL DE MEDIÇÃO -->
     <div id="measurePill" class="measure-pill">
       <span>📏 <span id="measureVal">0 m</span></span>
@@ -185,9 +187,11 @@
         </div>
 
         <div class="input-row">
-          <input id="searchInput" class="input" type="search" placeholder="Morada, cidade, trilho ou lat,lon...">
+          <input id="searchInput" class="input" type="search" placeholder="Morada, rua, loja, cidade ou lat,lon...">
           <button id="btnSearchGo" class="btn btn-primary">Ir</button>
         </div>
+
+        <div id="searchResults" style="display:flex;flex-direction:column;gap:8px;"></div>
 
         <div id="quickCarBox" class="list-card" style="display:none;">
           <div class="list-card-top">
@@ -195,11 +199,12 @@
               <div class="list-card-title">🚗 Carro Estacionado</div>
               <div id="quickCarSub" class="list-card-sub">--</div>
             </div>
-            <button id="btnRouteToCar" class="btn btn-sm btn-primary">Guiar até lá</button>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button id="btnRouteToCar" class="btn btn-sm btn-primary">Guiar até lá</button>
+              <button id="btnClearCar" class="btn btn-sm btn-danger">❌ Tirar Carro</button>
+            </div>
           </div>
         </div>
-
-        <div id="searchResults" style="display:flex;flex-direction:column;gap:8px;"></div>
 
         <div id="routeStepsBox" style="display:none;">
           <h4 style="margin:4px 0 8px;">Instruções da Rota</h4>
