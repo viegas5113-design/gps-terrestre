@@ -89,7 +89,8 @@
 
     waypoints: [],
     tracks: [],
-    carPos: null
+    carPos: null,
+    autoRecord: true
   };
 
   // --- DOM Helpers ---
@@ -103,6 +104,20 @@
     el._t = setTimeout(() => el.classList.remove('show'), ms);
   }
 
+  function showArrivalBanner(msg, ms = 6000) {
+    const el = $('arrivalBanner');
+    if (!el) return showToast(msg, ms);
+    $('arrivalBannerText').textContent = msg;
+    el.classList.add('visible');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove('visible'), ms);
+  }
+
+  function syncAutoRecordUI() {
+    if ($('cfgAutoRecord')) $('cfgAutoRecord').checked = !!state.autoRecord;
+    if ($('cfgAutoRecordTracks')) $('cfgAutoRecordTracks').checked = !!state.autoRecord;
+  }
+
   function loadStorage() {
     try {
       state.waypoints = JSON.parse(localStorage.getItem(STORAGE_WPTS) || '[]');
@@ -111,6 +126,7 @@
       const cfg = JSON.parse(localStorage.getItem(STORAGE_CFG) || '{}');
       if (cfg.coordFmt) state.coordFmt = cfg.coordFmt;
       if (cfg.speedLimit != null) state.speedLimit = Number(cfg.speedLimit) || 0;
+      if (cfg.autoRecord != null) state.autoRecord = Boolean(cfg.autoRecord);
       if (cfg.theme === 'day') document.body.classList.add('theme-day');
     } catch (e) {
       console.warn('Erro ao ler localStorage', e);
@@ -118,6 +134,7 @@
     $('cfgCoordFmt').value = state.coordFmt;
     $('cfgSpeedLimit').value = state.speedLimit;
     $('hudCoordFmt').textContent = state.coordFmt;
+    syncAutoRecordUI();
   }
 
   function saveWaypoints() {
@@ -134,6 +151,7 @@
       JSON.stringify({
         coordFmt: state.coordFmt,
         speedLimit: state.speedLimit,
+        autoRecord: state.autoRecord,
         theme: document.body.classList.contains('theme-day') ? 'day' : 'night'
       })
     );
@@ -655,6 +673,10 @@
     state.nav.lastSpokenIdx = -1;
     state.nav.stepIdx = 0;
 
+    if (state.autoRecord && !state.rec.active) {
+      startRecording({ silent: true });
+    }
+
     if (state.nav.mode === 'direct') {
       routePolyline.setLatLngs([]);
       directLine.setLatLngs([[state.lat, state.lon], [destLat, destLon]]);
@@ -713,6 +735,18 @@
     }).join('');
   }
 
+  function handleDestinationArrival(target) {
+    const destName = target.name || 'Destino';
+    speakPT(`Chegou ao seu destino: ${destName}`);
+    cancelNavigation();
+    if (state.rec.active) {
+      stopAndSaveRec({ auto: true, autoName: destName });
+      showArrivalBanner(`✅ Chegou ao destino (${destName}) — Percurso gravado automaticamente`);
+    } else {
+      showArrivalBanner(`🏁 Chegou ao destino: ${destName}`);
+    }
+  }
+
   function updateNavigationProgress() {
     if (!state.nav.active || state.lat == null || !state.nav.target) return;
     const t = state.nav.target;
@@ -730,6 +764,9 @@
       $('navEtr').textContent = `${mins} min`;
       const eta = new Date(Date.now() + mins * 60000);
       $('navEta').textContent = eta.toTimeString().slice(0, 5);
+      if (directD <= 35 && state.speedKmh <= 6) {
+        handleDestinationArrival(t);
+      }
       return;
     }
 
@@ -773,10 +810,8 @@
     const eta = new Date(Date.now() + mins * 60000);
     $('navEta').textContent = eta.toTimeString().slice(0, 5);
 
-    if (directD < 25) {
-      speakPT(`Chegou ao seu destino: ${t.name}`);
-      cancelNavigation();
-      showToast(`🏁 Chegou a ${t.name}!`);
+    if (directD <= 35 && state.speedKmh <= 6) {
+      handleDestinationArrival(t);
     }
   }
 
@@ -789,7 +824,8 @@
   }
 
   // --- Track Recorder ---
-  function startRecording() {
+  function startRecording(opts = {}) {
+    if (state.rec.active) return;
     state.rec = {
       active: true,
       paused: false,
@@ -810,6 +846,9 @@
     $('dockRecBtn').classList.add('recording');
     $('recStatusTxt').textContent = 'A gravar';
     $('btnRecPause').textContent = '⏸';
+    $('recDist').textContent = '0.00 km';
+    $('recTime').textContent = '00:00';
+    $('recGain').textContent = '+0m';
 
     state.rec.timerId = setInterval(() => {
       if (!state.rec.paused) {
@@ -819,8 +858,10 @@
         $('recGain').textContent = `+${Math.round(state.rec.gainMeters)}m`;
       }
     }, 1000);
-    closeAllSheets();
-    showToast('⏺️ Gravação de percurso iniciada');
+    if (!opts.silent) {
+      closeAllSheets();
+      showToast('⏺️ Gravação de percurso iniciada');
+    }
   }
 
   function togglePauseRec() {
@@ -830,25 +871,37 @@
     $('btnRecPause').textContent = state.rec.paused ? '▶' : '⏸';
   }
 
-  function stopAndSaveRec() {
+  function stopAndSaveRec(opts = {}) {
     if (!state.rec.active) return;
     clearInterval(state.rec.timerId);
     state.rec.active = false;
     $('recBar').classList.remove('visible');
     $('dockRecBtn').classList.remove('recording');
 
+    const isAuto = Boolean(opts && opts.auto);
+    if (isAuto && state.rec.points.length === 1 && state.lat != null) {
+      state.rec.points.push({ lat: state.lat, lon: state.lon, ele: state.alt, time: Date.now() });
+    }
+
     if (state.rec.points.length < 2) {
-      showToast('Percurso demasiado curto para guardar.');
+      if (!isAuto) showToast('Percurso demasiado curto para guardar.');
       return;
     }
 
-    const name = prompt('Nome do percurso:', `Percurso ${new Date().toLocaleDateString('pt-PT')} ${new Date().toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' })}`);
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('pt-PT');
+    const timeStr = now.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' });
+    const defaultName = opts && opts.autoName
+      ? `${opts.autoName} (${dateStr} ${timeStr})`
+      : `Percurso ${dateStr} ${timeStr}`;
+
+    const name = isAuto ? defaultName : prompt('Nome do percurso:', defaultName);
     if (!name) return;
 
     state.tracks.unshift({
       id: Date.now(),
       name,
-      date: new Date().toISOString(),
+      date: now.toISOString(),
       distMeters: state.rec.distMeters,
       durationSec: state.rec.elapsedSec,
       gainMeters: state.rec.gainMeters,
@@ -856,7 +909,9 @@
     });
     saveTracks();
     renderTracksList();
-    showToast(`💾 Percurso "${name}" guardado!`);
+    if (!isAuto) {
+      showToast(`💾 Percurso "${name}" guardado!`);
+    }
   }
 
   function renderTracksList() {
@@ -867,13 +922,14 @@
     }
     list.innerHTML = '';
     state.tracks.forEach((t) => {
+      const when = t.date ? new Date(t.date).toLocaleString('pt-PT', { dateStyle: 'short', timeStyle: 'short' }) : '';
       const div = document.createElement('div');
       div.className = 'list-card';
       div.innerHTML = `
         <div class="list-card-top">
           <div>
-            <div class="list-card-title">🥾 ${t.name}</div>
-            <div class="list-card-sub">${formatDistance(t.distMeters)} · ${formatDuration(t.durationSec)} · +${Math.round(t.gainMeters || 0)}m · ${t.points.length} pts</div>
+            <div class="list-card-title">🥾 ${escapeHtml(t.name)}</div>
+            <div class="list-card-sub">${when ? escapeHtml(when) + ' · ' : ''}${formatDistance(t.distMeters)} · ${formatDuration(t.durationSec)} · +${Math.round(t.gainMeters || 0)}m · ${t.points.length} pts</div>
           </div>
         </div>
         <div class="chip-row">
@@ -1259,9 +1315,23 @@
     }
   });
 
-  $('btnStartRecSheet').addEventListener('click', startRecording);
+  $('btnStartRecSheet').addEventListener('click', () => startRecording());
   $('btnRecPause').addEventListener('click', togglePauseRec);
-  $('btnRecStop').addEventListener('click', stopAndSaveRec);
+  $('btnRecStop').addEventListener('click', () => stopAndSaveRec());
+  if ($('arrivalBanner')) {
+    $('arrivalBanner').addEventListener('click', () => $('arrivalBanner').classList.remove('visible'));
+  }
+  const onAutoRecordChange = (e) => {
+    state.autoRecord = Boolean(e.target.checked);
+    syncAutoRecordUI();
+    saveCfg();
+    if (state.autoRecord && state.nav.active && !state.rec.active) {
+      startRecording({ silent: true });
+    }
+    showToast(state.autoRecord ? '⏺️ Gravação Automática ativada' : 'Gravação Automática desativada');
+  };
+  if ($('cfgAutoRecordTracks')) $('cfgAutoRecordTracks').addEventListener('change', onAutoRecordChange);
+  if ($('cfgAutoRecord')) $('cfgAutoRecord').addEventListener('change', onAutoRecordChange);
   $('importTrackFile').addEventListener('change', (e) => handleImportFile(e.target.files[0]));
   $('btnCloseProfile').addEventListener('click', () => { $('trackProfileBox').style.display = 'none'; });
 

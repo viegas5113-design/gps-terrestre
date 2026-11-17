@@ -127,6 +127,11 @@
           <button id="btnRecStop" class="btn btn-sm btn-danger">⏹ Guardar</button>
         </div>
       </div>
+
+      <!-- BANNER CHEGADA AO DESTINO -->
+      <div id="arrivalBanner" class="arrival-banner" role="status" aria-live="polite">
+        <span id="arrivalBannerText">✅ Chegou ao destino — Percurso gravado automaticamente</span>
+      </div>
     </section>
 
     <!-- BOTÕES FLUTUANTES NO MAPA -->
@@ -230,6 +235,14 @@
           </label>
         </div>
 
+        <label class="list-card toggle-row" for="cfgAutoRecordTracks">
+          <div>
+            <div class="list-card-title">⏺️ Gravação Automática</div>
+            <div class="list-card-sub">Inicia ao navegar e guarda ao chegar ao destino</div>
+          </div>
+          <input id="cfgAutoRecordTracks" class="toggle-switch" type="checkbox" checked>
+        </label>
+
         <div id="trackProfileBox" class="list-card" style="display:none;">
           <div class="list-card-top">
             <strong id="profileTitle">Perfil de Elevação</strong>
@@ -316,6 +329,10 @@
 
         <div class="list-card">
           <div class="list-card-title">⚙️ Definições & Alertas</div>
+          <label class="toggle-row-inline" for="cfgAutoRecord" style="margin-top:6px;">
+            <span style="font-size:13px;font-weight:600;">⏺️ Gravação Automática de Percursos</span>
+            <input id="cfgAutoRecord" class="toggle-switch" type="checkbox" checked>
+          </label>
           <label style="font-size:12px;color:var(--muted);margin-top:4px;">Alerta de Limite de Velocidade (km/h, 0 = desligado)</label>
           <input id="cfgSpeedLimit" class="input" type="number" min="0" max="250" value="0">
           <label style="font-size:12px;color:var(--muted);margin-top:4px;">Formato de Coordenadas</label>
